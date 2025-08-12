@@ -25,17 +25,18 @@ def signal_handler(signum, frame):
     exit(1)
 
 
-def generate_config_dict_list(config_file):
+
+def generate_config_dict_list(config_file, execution_timestamp=None):
     """
     Generate a list of dictionaries containing different configurations based on the input JSON file.
 
     Args:
         config_file (str): The path to the JSON file containing the configuration.
+        execution_timestamp (str): The execution timestamp to use for all configs (YYYYMMDD_HHMMSS format)
 
     Returns:
         list: A list of dictionaries, where each dictionary represents a different configuration.
     """
-
     # Load the contents of the JSON file into a dictionary
     with open(config_file) as f:
         config = json.load(f)
@@ -74,23 +75,29 @@ def generate_config_dict_list(config_file):
                 config_copy['variable_cell_power_dBm'] = power_dBm
                 config_copy['n_variable_power_cells'] = 0
                 
+                # Add execution timestamp if provided
+                if execution_timestamp:
+                    config_copy['execution_timestamp'] = execution_timestamp
+                
                 # Append the new dictionary object to the list
                 config_dict_list.append(config_copy)
             else:
                 # Create a new dictionary object for each iteration
-                for variable_power_cell in n_variable_power_cells:
-                    # Create a new dictionary object for each iteration
+                for n_cells in n_variable_power_cells:
                     config_copy = config.copy()
                     
-                    # Update the seed and power_dBm value in the new dictionary object
+                    # Update the values in the new dictionary object
                     config_copy['seed'] = seed
                     config_copy['variable_cell_power_dBm'] = power_dBm
-                    config_copy['n_variable_power_cells'] = variable_power_cell
+                    config_copy['n_variable_power_cells'] = n_cells
+                    
+                    # Add execution timestamp if provided
+                    if execution_timestamp:
+                        config_copy['execution_timestamp'] = execution_timestamp
                     
                     # Append the new dictionary object to the list
                     config_dict_list.append(config_copy)
 
-    # Return the list of dictionaries
     return config_dict_list
 
 
@@ -158,7 +165,10 @@ def remove_temp_json(json_file_list):
         except OSError as e:
             print(f"Error deleting file: {e}")
  
-
+# Callback function to update progress
+def update_progress(result):
+    with progress_counter.get_lock():
+        progress_counter.value += 1
 
 
 import multiprocessing as mp
@@ -185,27 +195,32 @@ if __name__ == '__main__':
     # Start the timer
     start_time = time.time()
 
-    config_dict_list = generate_config_dict_list(args.config_file)
+    # 현재 실행의 타임스탬프 생성 (모든 시드가 공유)
+    current_run_date_raw = datetime.now().strftime("%Y%m%d")  # "20250721"
+    current_run_date = datetime.now().strftime("%Y_%m_%d")    # "2025_07_21" (디렉토리용)
+    current_run_time = datetime.now().strftime("%H%M%S")      # "015124"
+    execution_timestamp = f"{current_run_date_raw}_{current_run_time}"  # "20250721_015124"
+    
+    config_dict_list = generate_config_dict_list(args.config_file, execution_timestamp=execution_timestamp)
 
     # Dump the list of dictionaries to individual JSON files
     json_file_list = dump_json(config_dict_list)
 
     # Initialize a multiprocessing pool with 6 processes and 1 task per child
-    num_processes = 6
+    num_processes = 12
     num_tasks_per_child = 1
     progress_counter = mp.Value('i', 0)  # Shared variable to keep track of progress
 
     with mp.Pool(processes=num_processes, maxtasksperchild=num_tasks_per_child) as pool:
-        # Run the run_kiss function on each JSON file in the list
+        # Store async results
+        async_results = []
+        
+        # Submit all tasks asynchronously
         for json_file in json_file_list:
-            pool.apply(run_kiss, args=(json_file,)) 
-
-            # Increment the progress counter by 1
-            with progress_counter.get_lock():
-                progress_counter.value += 1
-                print(f"Processed {progress_counter.value} of {len(json_file_list)} files")
-
-        # Close the pool and wait for all processes to complete
+            # Apply async with callback for progress tracking
+            result = pool.apply_async(run_kiss, args=(json_file,), callback=update_progress)
+            async_results.append(result)
+        
         pool.close()
         pool.join()
 
