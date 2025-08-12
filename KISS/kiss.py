@@ -37,7 +37,7 @@ def create_logfile_path(config_dict, debug_logger: bool = False):
             time_str = parts[1]  # HHMMSS
             
             # 날짜를 YYYY_MM_DD 형식으로 변환
-            if len(date_str) == 8:  # YYYYMMDD
+            if len(date_str) == 8:  # YYYYMMDD 
                 date_now = f"{date_str[:4]}_{date_str[4:6]}_{date_str[6:8]}"
             else:
                 date_now = date_str  # 이미 올바른 형식인 경우
