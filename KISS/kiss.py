@@ -265,6 +265,117 @@ class Cellv2(Cell):
                 cell_throughput += ue_tp_check
         return cell_throughput
     
+    def get_eff_bandwidth(self):
+        """
+        유효 대역폭 계산 (subband mask 고려)
+        Beff = B * (1/n_subbands) * sum(subband_mask)
+        """
+        if hasattr(self, 'subband_mask') and self.subband_mask is not None:
+            # Subband mask가 있는 경우
+            active_subbands = np.sum(self.subband_mask)
+            beff = self.bw_MHz * (active_subbands / self.n_subbands)
+        else:
+            # Subband mask가 없는 경우 전체 대역폭 사용
+            beff = self.bw_MHz
+        return beff
+    
+    def get_average_spectral_efficiency(self):
+        """
+        평균 SE 계산 (수정된 버전)
+        """
+        if len(self.attached) == 0:
+            return 0.0
+        
+        from AIMM_simulator.NR_5G_standard_functions import CQI_to_64QAM_efficiency
+        
+        total_se = 0.0
+        valid_ue_count = 0
+        
+        for ue_id in self.attached:
+            # reports에서 직접 CQI 가져오기
+            if 'cqi' in self.reports and ue_id in self.reports['cqi']:
+                cqi_report = self.reports['cqi'][ue_id]
+                if cqi_report is not None:
+                    cqi_array = cqi_report[1] if isinstance(cqi_report, tuple) else cqi_report
+                    
+                    if isinstance(cqi_array, (int, float)) and not np.isnan(cqi_array):
+                        # 단일 CQI 값
+                        se = CQI_to_64QAM_efficiency(int(cqi_array))
+                        total_se += se
+                        valid_ue_count += 1
+                    elif isinstance(cqi_array, np.ndarray):
+                        # CQI 배열
+                        se_values = []
+                        for cqi_val in cqi_array:
+                            if not np.isnan(cqi_val):
+                                se = CQI_to_64QAM_efficiency(int(cqi_val))
+                                se_values.append(se)
+                        
+                        if se_values:
+                            ue_avg_se = np.mean(se_values)
+                            total_se += ue_avg_se
+                            valid_ue_count += 1
+        
+        # 평균 SE 반환
+        if valid_ue_count > 0:
+            avg_se = total_se / valid_ue_count
+        else:
+            # CQI 정보가 없으면 기본값 사용
+            avg_se = 2.0  # 기본 SE 값 (중간 정도의 채널 품질 가정)
+        
+        return avg_se
+            
+    def get_cell_ref_capacity(self, overhead=0.15):
+        """
+        셀 기준 용량 계산
+        C_cell(t) = B_eff(t) * SE_ref(t) * (1 - OH)
+        
+        Parameters:
+        -----------
+        overhead : float
+            오버헤드 비율 (기본값 0.15 = 15%)
+        
+        Returns:
+        --------
+        float
+            셀 기준 용량 (Mb/s)
+        """
+        beff = self.get_eff_bandwidth()  # MHz
+        se_ref = self.get_average_spectral_efficiency()  # bits/Hz
+        
+        # 용량 계산: MHz * bits/Hz * (1-OH) = Mb/s
+        capacity = beff * se_ref * (1 - overhead)
+        
+        return capacity    
+    
+    def get_cell_load(self, overhead=0.15, debug=False):
+        """ 
+        셀 부하 계산 (디버깅 기능 추가)
+        """
+        # 셀 throughput (실제로는 총 throughput)
+        cell_throughput = self.get_average_throughput()
+        
+        # 셀에 연결된 UE 수
+        n_attached = len(self.attached)
+        
+        # 용량 계산을 위한 요소들
+        beff = self.get_eff_bandwidth()
+        se_ref = self.get_average_spectral_efficiency()
+        cell_capacity = beff * se_ref * (1 - overhead)
+        
+        # 부하 계산
+        if cell_capacity > 0:
+            load = cell_throughput / cell_capacity
+        else:
+            load = 0.0 if cell_throughput == 0 else float('inf')
+        
+        if debug:
+            print(f"Cell Load: {load:.6f}")
+            print("=" * 30)
+        
+        return load
+
+    
     def loop(self):
         '''
         Main loop of Cellv2 class.
@@ -498,7 +609,8 @@ class CellEnergyModel:
         # Calculate the starting cell power
         self.cell_power_watts = self.params.sectors * self.params.antennas * (
             self.p_static_watts + self. p_dynamic_watts)
-
+        
+        
         # END of INIT
 
     def from_dBm_to_watts(self, x):
@@ -534,11 +646,22 @@ class CellEnergyModel:
 
         # Get current TRX chain output power in watts
         trx_p_out_watts = self.get_power_out_per_trx_chain_watts(cell_p_out_dBm)
-
+        
+        # cell_load
+        rho_raw = self.cell.get_cell_load(overhead=0.15, debug=False)
+        rho = min(rho_raw, 1.0)  # Ensure rho does not exceed 1.0
+        
+        # 여기랑
         # Sanity check that other input values are in decimal form
-        p_rf_watts = self.params.power_rf_watts
-        p_bb_watts = self.params.power_baseband_watts
-
+        rf_nom = self.params.power_rf_watts
+        bb_nom = self.params.power_baseband_watts
+        rf_idle_frac = getattr(self.params, "rf_idle_frac", 0.3)  
+        bb_idle_frac = getattr(self.params, "bb_idle_frac", 0.4)
+        gamma_rf = getattr(self.params, "gamma_rf", 1.0)  
+        gamma_bb = getattr(self.params, "gamma_bb", 1.0)
+        p_rf_watts = rf_idle_frac*rf_nom + (rf_nom - rf_idle_frac*rf_nom) * (rho ** gamma_rf)
+        p_bb_watts = bb_idle_frac*bb_nom + (bb_nom - bb_idle_frac*bb_nom) * (rho ** gamma_bb)
+        
         # Calculate the Power Amplifier power consumption in watts
         if trx_p_out_watts == 0.0:
             p_pa_watts = 0.0
@@ -937,13 +1060,17 @@ class MyLogger(Logger):
             sinr = UE.sinr_dB                                               # current UE sinr from serving_cell
             cqi = UE.cqi                                                    # current UE cqi from serving_cell
             mcs = self.get_cqi_to_mcs(cqi)                                  # current UE mcs for serving_cell
+            cell_eff_bw = serving_cell.get_eff_bandwidth()  # current UE serving_cell effective bandwidth
+            cell_avg_se = serving_cell.get_average_spectral_efficiency()  # current UE serving_cell average spectral efficiency
+            cell_ref_capacity = serving_cell.get_cell_ref_capacity()  # current UE serving_cell capacity
+            cell_load = serving_cell.get_cell_load()                              # current UE serving_cell load
             cell_tp = serving_cell.get_cell_throughput()                    # current UE serving_cell throughput
             cell_power_kW = cell_energy_model.get_cell_power_watts(tm) / 1e3          # current UE serving_cell power consumption
             cell_ee = (cell_tp * 1e6) / (cell_power_kW * 1e3)               # current UE serving_cell energy efficiency
             cell_se = (cell_tp * 1e6) / (serving_cell.bw_MHz * 1e6)         # current UE serving_cell spectral efficiency
 
             # Get the above as a list
-            data_list = [seed, tm, sc_id, sc_sleep_mode, ue_id, d2sc, ue_tp, sc_power_dBm, sc_power_watts, sc_rsrp, neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_tp, cell_power_kW, cell_ee, cell_se]
+            data_list = [seed, tm, sc_id, sc_sleep_mode, ue_id, d2sc, ue_tp, sc_power_dBm, sc_power_watts, sc_rsrp, neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_eff_bw, cell_avg_se, cell_ref_capacity, cell_load, cell_tp, cell_power_kW, cell_ee, cell_se]
 
             # convert ndarrays to str or float
             for i, j in enumerate(data_list):
@@ -979,7 +1106,11 @@ class MyLogger(Logger):
         noise = float('nan')                                        # current UE thermal noise
         sinr = float('nan')                                         # current UE sinr from serving_cell
         cqi = float('nan')                                          # current UE cqi from serving_cell
-        mcs = float('nan')                                          # current UE mcs for serving_cell
+        mcs = float('nan')
+        cell_eff_bandwidth = float('nan')
+        cell_avg_se = float('nan')
+        cell_ref_capacity = float('nan')
+        cell_load = float('nan')# current UE mcs for serving_cell
         cell_tp = cell.get_cell_throughput()                        # current UE serving_cell throughput
         cell_power_kW = cell_energy_model.get_cell_power_watts(tm) / 1e3    # current UE serving_cell power consumption
         cell_ee = ((cell_tp * 1e6) / (cell_power_kW * 1e3)) * 1e6   # current UE serving_cell energy efficiency
@@ -987,7 +1118,7 @@ class MyLogger(Logger):
 
         # Get the above as a list
         data_list = [seed, tm, sc_id, sc_sleep_mode, ue_id, d2sc, ue_tp, sc_power_dBm, sc_power_watts, sc_rsrp, 
-                     neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_tp, cell_power_kW, 
+                     neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_eff_bandwidth, cell_avg_se, cell_ref_capacity, cell_load, cell_tp, cell_power_kW, 
                      cell_ee, cell_se]
 
         # convert ndarrays to str or float
@@ -1007,7 +1138,7 @@ class MyLogger(Logger):
         columns = ["seed", "time", "serving_cell_id", "serving_cell_sleep_mode", "ue_id",
             "distance_to_cell(m)", "ue_throughput(Mb/s)", "sc_power(dBm)", "sc_power(watts)","sc_rsrp(dBm)", 
             "neighbour1_rsrp(dBm)", "neighbour2_rsrp(dBm)", "noise_power(dBm)", "sinr(dB)", 
-            "cqi", "mcs", "cell_throughput(Mb/s)", "cell_power(kW)", "cell_ee(bits/J)", 
+            "cqi", "mcs", "cell_eff_bandwidth", "cell_avg_ se", "cell_ref_capacity", "cell_load", "cell_throughput(Mb/s)", "cell_power(kW)", "cell_ee(bits/J)", 
             "cell_se(bits/Hz)"]
         for cell in self.sim.cells:
             if len(cell.attached) != 0:
