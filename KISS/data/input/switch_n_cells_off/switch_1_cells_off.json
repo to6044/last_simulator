@@ -12,11 +12,11 @@
     "isd": 500,
     "sim_radius": 1000,
     "h_BS": 25,
-    "power_dBm": 43.0,
-    "power_dBm_end": 43.0,
+    "power_dBm": 0.0,
+    "power_dBm_end": 0.0,
     "power_dBm_step": 0.0,
     "variable_cell_power_dBm": 0.0,
-    "constant_cell_power_dBm": 43.0,
+    "constant_cell_power_dBm": 24.0,
     "n_variable_power_cells": 0,
     "variable_power_target_cells_list": [
         

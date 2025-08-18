@@ -1138,7 +1138,7 @@ class MyLogger(Logger):
         columns = ["seed", "time", "serving_cell_id", "serving_cell_sleep_mode", "ue_id",
             "distance_to_cell(m)", "ue_throughput(Mb/s)", "sc_power(dBm)", "sc_power(watts)","sc_rsrp(dBm)", 
             "neighbour1_rsrp(dBm)", "neighbour2_rsrp(dBm)", "noise_power(dBm)", "sinr(dB)", 
-            "cqi", "mcs", "cell_eff_bandwidth", "cell_avg_ se", "cell_ref_capacity", "cell_load", "cell_throughput(Mb/s)", "cell_power(kW)", "cell_ee(bits/J)", 
+            "cqi", "mcs", "cell_eff_bandwidth(MHz)", "cell_avg_ se(bits/Hz)", "cell_ref_capacity_OH(Mb/s)", "cell_load()", "cell_rr_capacity(Mb/s)", "cell_power(kW)", "cell_ee(bits/J)", 
             "cell_se(bits/Hz)"]
         for cell in self.sim.cells:
             if len(cell.attached) != 0:
