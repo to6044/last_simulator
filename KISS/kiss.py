@@ -13,7 +13,6 @@ import pandas as pd
 from AIMM_simulator import *
 from hexalattice.hexalattice import *
 import utils_kiss
-from exp3_cell_onoff import EXP3CellOnOff, create_exp3_scenario
 
 
 # Fix custom imports
@@ -964,341 +963,7 @@ class SetCellSleep(Scenario):
                         self.bedtime_stories.remove(item)
                 yield self.sim.wait(self.interval)
 
-class EXP3CellOnOffScenario(Scenario):
-    """
-    EXP3-based Cell On/Off Scenario for KISS simulator
-    """
-    
-    def __init__(self, sim, config):
-        """
-        Initialize EXP3 Cell On/Off scenario
-        
-        Parameters:
-        -----------
-        sim : Sim
-            KISS/AIMM simulator instance
-        config : Dict
-            Configuration dictionary containing EXP3 parameters
-        """
-        super().__init__(sim, interval=config.get('interval', 1.0))
-        
-        # Create EXP3 controller
-        self.exp3_controller = EXP3CellOnOff(sim, config)
-        self.config = config
-        self.delay_time = delay
-        self.sim = sim
-        
-        # Results storage
-        self.results_per_seed = []
-        
-    def loop(self):
-        """
-        Main loop that delegates to EXP3 controller
-        """
-        # Run the EXP3 controller loop
-        yield from self.exp3_controller.loop()
-    
-    def finalize(self):
-        """
-        Called at the end of simulation to save results
-        """
-        # Save results for this seed
-        output_dir = self.config.get('output_settings', {}).get('output_dir', 'data/output/exp3_cell_onoff')
-        seed = self.config.get('current_seed', 0)
-        seed_output_dir = f"{output_dir}/seed_{seed}"
-        
-        self.exp3_controller.save_results(seed_output_dir)
-        
-        # Store results for cross-seed analysis
-        self.results_per_seed.append({
-            'seed': seed,
-            'controller': self.exp3_controller
-        })
 
-
-
-# Add this function to be called in the main kiss.py script
-def setup_exp3_scenario(sim, config_file_path):
-    """
-    Setup function to be called from main kiss.py
-    Replaces or extends the existing scenario setup
-    """
-    import json
-    
-    # Load configuration
-    with open(config_file_path, 'r') as f:
-        config = json.load(f)
-    
-    # Check if this is an EXP3 scenario
-    if config.get('scenario_profile') == 'exp3_cell_onoff':
-        # Extract EXP3 specific parameters
-        exp3_config = config.get('exp3_params', {})
-        exp3_config.update({
-            'power_dBm': config.get('power_dBm', 43.0),
-            'n_cells': len(sim.cells),
-            'output_dir': config.get('output_settings', {}).get('output_dir'),
-            'current_seed': config.get('current_seed', 1)
-        })
-        
-        # Create and add the EXP3 scenario
-        exp3_scenario = EXP3CellOnOffScenario(sim, exp3_config)
-        sim.add_scenario(scenario=exp3_scenario)
-        
-        return exp3_scenario
-    
-    return None
-
-
-# Modified main execution part of kiss.py (add to existing code)
-def run_exp3_simulation(config_file_path):
-    """
-    Main function to run EXP3 cell on/off simulation
-    This should be integrated into the existing kiss.py main function
-    """
-    import json
-    import os
-    from pathlib import Path
-    
-    # Load configuration
-    with open(config_file_path, 'r') as f:
-        config = json.load(f)
-    
-    # Get seed list
-    seed_list = config.get('seed_list', [1])
-    
-    # Results aggregation
-    all_results = []
-    
-    for seed in seed_list:
-        print(f"\n{'='*60}")
-        print(f"Running simulation with seed {seed}")
-        print(f"{'='*60}\n")
-        
-        # Update seed in config
-        config['seed'] = seed
-        config['current_seed'] = seed
-        
-        # Initialize simulator (existing KISS code)
-        sim = Sim(rng_seed=seed)
-        
-        # Create cells (hexagonal layout - existing KISS code)
-        isd = config.get('isd', 500)
-        power_dBm = config.get('power_dBm', 43.0)
-        
-        # Center cell
-        sim.make_cell(xyz=(0, 0, config.get('h_BS', 25)), 
-                     power_dBm=power_dBm,
-                     n_subbands=3)
-        
-        # First ring (6 cells)
-        for i in range(6):
-            angle = i * np.pi / 3
-            x = isd * np.cos(angle)
-            y = isd * np.sin(angle)
-            sim.make_cell(xyz=(x, y, config.get('h_BS', 25)),
-                         power_dBm=power_dBm,
-                         n_subbands=3)
-        
-        # Second ring (12 cells) - optional
-        for i in range(12):
-            angle = i * np.pi / 6
-            if i % 2 == 0:
-                r = isd * np.sqrt(3)
-            else:
-                r = 2 * isd
-            x = r * np.cos(angle)
-            y = r * np.sin(angle)
-            sim.make_cell(xyz=(x, y, config.get('h_BS', 25)),
-                         power_dBm=power_dBm,
-                         n_subbands=3)
-        
-        # Create UEs (using existing KISS methods)
-        nues = config.get('nues', 100)
-        h_UT = config.get('h_UT', 1.5)
-        sim_radius = config.get('sim_radius', 1000)
-        
-        # Use Poisson Point Process for UE distribution
-        from scipy.stats import uniform
-        for _ in range(nues):
-            r = sim_radius * np.sqrt(uniform.rvs())
-            theta = uniform.rvs() * 2 * np.pi
-            x = r * np.cos(theta)
-            y = r * np.sin(theta)
-            
-            ue = sim.make_UE(xyz=(x, y, h_UT),
-                           reporting_interval=config.get('base_interval', 1.0),
-                           verbosity=0)
-            ue.attach_to_strongest_cell_simple_pathloss_model()
-        
-        # Setup custom logger for EXP3 metrics
-        class EXP3Logger(Logger):
-            def __init__(self, sim, exp3_scenario, **kwargs):
-                super().__init__(sim, **kwargs)
-                self.exp3_scenario = exp3_scenario
-                self.dataframe = None
-                
-            def loop(self):
-                while True:
-                    if self.sim.env.now > 0:
-                        # Log EXP3 specific metrics
-                        controller = self.exp3_scenario.exp3_controller
-                        metrics = controller.calculate_network_metrics()
-                        
-                        data = {
-                            'time': self.sim.env.now,
-                            'episode': controller.exp3.episode_count,
-                            'throughput': metrics['throughput'],
-                            'power': metrics['power'],
-                            'efficiency': metrics['efficiency'],
-                            'active_cells': metrics['active_cells'],
-                            'cells_off': ','.join(map(str, controller.current_off_cells)),
-                            'reward': controller.exp3.reward_history[-1] if controller.exp3.reward_history else 0,
-                            'cumulative_reward': controller.exp3.cumulative_rewards[-1] if controller.exp3.cumulative_rewards else 0
-                        }
-                        
-                        # Save to dataframe
-                        if self.dataframe is None:
-                            self.dataframe = pd.DataFrame([data])
-                        else:
-                            self.dataframe = pd.concat([self.dataframe, pd.DataFrame([data])], 
-                                                      ignore_index=True)
-                    
-                    yield self.sim.env.timeout(self.logging_interval)
-            
-            def finalize(self):
-                # Save dataframe to TSV
-                if self.dataframe is not None:
-                    output_dir = Path(config.get('output_settings', {}).get('output_dir', 'data/output/exp3_cell_onoff'))
-                    output_dir = output_dir / f"seed_{config['current_seed']}"
-                    output_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    self.dataframe.to_csv(output_dir / 'exp3_metrics.tsv', 
-                                         sep='\t', index=False)
-        
-        # Setup EXP3 scenario
-        exp3_scenario = setup_exp3_scenario(sim, config_file_path)
-        
-        # Add logger
-        if exp3_scenario:
-            exp3_logger = EXP3Logger(sim, exp3_scenario, 
-                                   logging_interval=config.get('base_interval', 1.0))
-            sim.add_logger(exp3_logger)
-        
-        # Add MME for handovers (using existing KISS AMFv1)
-        from kiss import AMFv1  # Import from existing KISS
-        mme = AMFv1(sim,
-                   cqi_limit=config.get('mme_cqi_limit', 1),
-                   interval=config.get('base_interval', 1.0),
-                   strategy=config.get('mme_strategy', 'best_rsrp_cell'),
-                   anti_pingpong=config.get('mme_anti_pingpong', 3.0),
-                   verbosity=config.get('mme_verbosity', 0))
-        sim.add_MME(mme=mme)
-        
-        # Run simulation
-        until = config.get('until', 1000)
-        sim.run(until=until)
-        
-        # Collect results
-        if exp3_scenario:
-            all_results.append({
-                'seed': seed,
-                'controller': exp3_scenario.exp3_controller
-            })
-    
-    # Aggregate results across seeds
-    if all_results:
-        aggregate_exp3_results(all_results, config)
-    
-    print("\n" + "="*60)
-    print("EXP3 Cell On/Off Simulation Complete!")
-    print("="*60)
-
-
-def aggregate_exp3_results(all_results, config):
-    """
-    Aggregate and analyze results across multiple seeds
-    """
-    import numpy as np
-    from scipy import stats
-    import pandas as pd
-    from pathlib import Path
-    
-    output_dir = Path(config.get('output_settings', {}).get('output_dir', 'data/output/exp3_cell_onoff'))
-    output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Collect metrics across seeds
-    metrics_collection = {
-        'cumulative_rewards': [],
-        'cumulative_regrets': [],
-        'energy_savings': [],
-        'throughput': [],
-        'efficiency': [],
-        'stabilization_episodes': [],
-        'final_probabilities': []
-    }
-    
-    for result in all_results:
-        controller = result['controller']
-        metrics_collection['cumulative_rewards'].append(controller.exp3.cumulative_rewards)
-        metrics_collection['cumulative_regrets'].append(controller.exp3.cumulative_regret)
-        metrics_collection['energy_savings'].append(controller.energy_savings_history)
-        metrics_collection['throughput'].append(controller.throughput_history)
-        metrics_collection['efficiency'].append(controller.efficiency_history)
-        metrics_collection['stabilization_episodes'].append(controller.exp3.stabilization_episode)
-        metrics_collection['final_probabilities'].append(controller.exp3.probabilities)
-    
-    # Calculate statistics
-    summary_stats = {}
-    
-    # Cumulative rewards statistics
-    rewards_array = np.array(metrics_collection['cumulative_rewards'])
-    summary_stats['cumulative_reward_mean'] = np.mean(rewards_array, axis=0).tolist()
-    summary_stats['cumulative_reward_std'] = np.std(rewards_array, axis=0).tolist()
-    
-    # Confidence intervals
-    confidence_level = config.get('evaluation_metrics', {}).get('confidence_level', 0.95)
-    n_seeds = len(all_results)
-    
-    if n_seeds > 1:
-        t_critical = stats.t.ppf((1 + confidence_level) / 2, n_seeds - 1)
-        ci_lower = summary_stats['cumulative_reward_mean'] - t_critical * np.array(summary_stats['cumulative_reward_std']) / np.sqrt(n_seeds)
-        ci_upper = summary_stats['cumulative_reward_mean'] + t_critical * np.array(summary_stats['cumulative_reward_std']) / np.sqrt(n_seeds)
-        summary_stats['confidence_interval_lower'] = ci_lower.tolist()
-        summary_stats['confidence_interval_upper'] = ci_upper.tolist()
-    
-    # Energy savings statistics
-    energy_array = np.array(metrics_collection['energy_savings'])
-    summary_stats['energy_savings_mean'] = np.mean(energy_array, axis=0).tolist()
-    summary_stats['energy_savings_std'] = np.std(energy_array, axis=0).tolist()
-    
-    # Average cell throughput
-    throughput_array = np.array(metrics_collection['throughput'])
-    summary_stats['avg_cell_throughput_mean'] = np.mean(throughput_array, axis=0).tolist()
-    summary_stats['avg_cell_throughput_std'] = np.std(throughput_array, axis=0).tolist()
-    
-    # Stabilization analysis
-    stabilization_episodes = [e for e in metrics_collection['stabilization_episodes'] if e is not None]
-    if stabilization_episodes:
-        summary_stats['avg_stabilization_episode'] = np.mean(stabilization_episodes)
-        summary_stats['std_stabilization_episode'] = np.std(stabilization_episodes)
-    
-    # Save summary statistics
-    with open(output_dir / 'summary_statistics.json', 'w') as f:
-        json.dump(summary_stats, f, indent=2)
-    
-    # Create summary TSV
-    summary_df = pd.DataFrame({
-        'metric': list(summary_stats.keys()),
-        'value': [str(v) if isinstance(v, list) else v for v in summary_stats.values()]
-    })
-    summary_df.to_csv(output_dir / 'summary_statistics.tsv', sep='\t', index=False)
-    
-    print(f"\nSummary statistics saved to {output_dir}")
-    print(f"Average stabilization episode: {summary_stats.get('avg_stabilization_episode', 'N/A')}")
-    print(f"Average energy savings: {np.mean(summary_stats['energy_savings_mean']):.2f}%")
-    print(f"Average efficiency improvement: {(np.mean(metrics_collection['efficiency']) / all_results[0]['controller'].baseline_efficiency - 1) * 100:.2f}%")
-
- 
 class MyLogger(Logger):
 
     def __init__(self, *args,cell_energy_models=None, logfile_path=None, **kwargs):
@@ -2004,15 +1669,6 @@ def main(config_dict):
         time_cell_sleep_level_duration=SetCellSleep_bedtime_stories
         )
     
-    exp3_cell_onoff = None
-    if scenario_profile == "exp3_cell_onoff":
-        exp3_cell_onoff = EXP3CellOnOffScenario(
-            sim=sim,
-            delay=scenario_delay,
-            interval=base_interval,
-            n_cells=scenario_n_cells
-        )
- 
     # Activate scenarios
     if scenario_profile == "reduce_random_cell_power":
         sim.add_scenario(scenario=reduce_random_cell_power)
@@ -2024,8 +1680,6 @@ def main(config_dict):
         sim.add_scenario(scenario=change_inner_ring_power)
     elif scenario_profile == "switch_n_cells_off":
         sim.add_scenario(scenario=switch_n_cells_off)
-    elif scenario_profile == "exp3_cell_onoff":
-        sim.add_scenario(scenario=exp3_cell_onoff)
     elif scenario_profile == "set_cell_sleep":
         sim.add_scenario(scenario=set_cell_sleep)
     elif scenario_profile == "no_scenarios":
@@ -2089,10 +1743,16 @@ def main(config_dict):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Run KISS simulation with EXP3 Cell On/Off')
-    parser.add_argument('-c', '--config-file', type=str, required=True,
-                       default='data/input/exp3_cell_onoff/exp3_cell_onoff.json',
-                       help='Path to configuration file')
+    parser = argparse.ArgumentParser(
+        description='Run kiss.py against a specified config value.')
+
+    parser.add_argument(
+        '-c',
+        '--config-file',
+        type=str,
+        required=True,
+        default='KISS/_test/data/input/kiss/test_kiss.json'
+        )
     
     args = parser.parse_args()
 
@@ -2100,14 +1760,7 @@ if __name__ == '__main__':
     config_file = args.config_file
     with open(config_file, "r") as f:
         config = json.load(f)
-    
-    if config.get('scenario_profile') == 'exp3_cell_onoff':
-        # Run EXP3 simulation
-        run_exp3_simulation(args.config_file)
-    else:
-        # Run standard KISS simulation (existing code)
-        print("Running standard KISS simulation...")
-        
+
     # Import plt if plotting is enabled
     if config["plotting"]:
         try:
