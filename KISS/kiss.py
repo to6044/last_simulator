@@ -11,6 +11,8 @@ from typing import List, Dict, Tuple, Optional
 from collections import defaultdict
 from math import comb
 from itertools import combinations
+from pathlib import Path
+import re
 
 import numpy as np
 import pandas as pd
@@ -817,8 +819,7 @@ class CellEnergyModel:
 
 class EXP3CellOnOff(Scenario):
     """
-    EXP3 algorithm based cell on/off scenario.
-    Dynamically selects k cells out of n to turn off based on network efficiency.
+    Enhanced EXP3 algorithm based cell on/off scenario with extended metrics tracking.
     """
     
     def __init__(self, sim, k_cells_to_off: int, n_total_cells: int = None,
@@ -827,20 +828,7 @@ class EXP3CellOnOff(Scenario):
                  enable_warm_up: bool = True, min_selection_guarantee: bool = True,
                  normalization_window: int = 50, event_threshold: int = 10):
         """
-        Initialize EXP3 Cell On/Off scenario.
-        
-        Args:
-            sim: Simulation environment
-            k_cells_to_off: Number of cells to turn off
-            n_total_cells: Total number of cells (if None, uses all cells)
-            interval: Update interval
-            delay: Initial delay before starting
-            gamma: Exploration parameter for EXP3 (0 < gamma <= 1)
-            warm_up_episodes: Number of warm-up episodes
-            enable_warm_up: Enable ε-greedy warm-up phase
-            min_selection_guarantee: Ensure each arm is selected at least once
-            normalization_window: Window size for reward normalization
-            event_threshold: Minimum events required to trigger arm selection
+        Initialize Enhanced EXP3 Cell On/Off scenario.
         """
         self.sim = sim
         self.k_cells_to_off = k_cells_to_off
@@ -864,20 +852,41 @@ class EXP3CellOnOff(Scenario):
         self.event_count = 0
         self.current_arm = None
         self.current_cells_off = []
+        self.previous_cells_off = []
         
-        # Performance tracking
+        # Extended performance tracking
         self.reward_history = []
+        self.cumulative_reward = 0.0
+        self.cumulative_regret = 0.0
+        self.best_reward_estimate = 0.0
         self.efficiency_history = []
         self.throughput_history = []
         self.power_history = []
         self.arm_selection_history = []
+        self.probability_history = []
+        self.switching_cost_history = []
+        
+        # Baseline metrics
+        self.baseline_power = None
+        self.baseline_throughput = None
+        self.baseline_efficiency = None
+        self.all_on_metrics = {'power': None, 'throughput': None, 'efficiency': None}
+        
+        # Cell throughput tracking
+        self.cell_throughput_history = defaultdict(list)
+        
+        # Convergence tracking
+        self.probability_stability_window = 50
+        self.convergence_threshold = 0.01
+        self.convergence_episode = None
+        self.probability_change_history = []
         
         # Normalization parameters
         self.reward_min = float('inf')
         self.reward_max = float('-inf')
         self.reward_buffer = []
         
-        print(f"EXP3CellOnOff initialized: k={k_cells_to_off}, n={self.n_total_cells}, "
+        print(f"Enhanced EXP3CellOnOff initialized: k={k_cells_to_off}, n={self.n_total_cells}, "
               f"arms={self.n_arms}, gamma={gamma}")
     
     def _calculate_n_arms(self) -> int:
@@ -886,129 +895,216 @@ class EXP3CellOnOff(Scenario):
         return comb(self.n_total_cells, self.k_cells_to_off)
     
     def _get_arm_combination(self, arm_idx: int) -> List[int]:
-        """
-        Convert arm index to cell combination.
-        Uses combinatorial number system.
-        """
+        """Convert arm index to cell combination."""
         from itertools import combinations
         all_combinations = list(combinations(range(self.n_total_cells), self.k_cells_to_off))
-        if arm_idx < len(all_combinations):
-            return list(all_combinations[arm_idx])
-        return []
+        return list(all_combinations[arm_idx])
     
     def _select_arm(self) -> int:
-        """Select arm using EXP3 algorithm or warm-up strategy."""
-        self.episode_count += 1
-        
-        # Warm-up phase: pure exploration
-        if self.enable_warm_up and self.episode_count <= self.warm_up_episodes:
-            # Random selection during warm-up
-            return self.sim.rng.integers(0, self.n_arms)
+        """Select an arm based on EXP3 algorithm."""
+        if self.enable_warm_up and self.episode_count < self.warm_up_episodes:
+            # ε-greedy warm-up phase
+            epsilon = 0.5 * (1 - self.episode_count / self.warm_up_episodes)
+            if np.random.random() < epsilon:
+                return np.random.choice(self.n_arms)
         
         # Ensure minimum selection guarantee
         if self.min_selection_guarantee:
             unselected = np.where(self.arm_selections == 0)[0]
             if len(unselected) > 0:
-                return self.sim.rng.choice(unselected)
+                return np.random.choice(unselected)
         
-        # EXP3 selection
-        self._update_probabilities()
-        arm = self.sim.rng.choice(self.n_arms, p=self.probabilities)
-        return arm
+        # Normal EXP3 selection
+        return np.random.choice(self.n_arms, p=self.probabilities)
     
     def _update_probabilities(self):
-        """Update arm selection probabilities based on weights."""
-        # Mix uniform distribution with weight-based distribution
+        """Update arm selection probabilities."""
         uniform_prob = 1.0 / self.n_arms
         weight_sum = np.sum(self.weights)
+        
+        old_probabilities = self.probabilities.copy()
         
         if weight_sum > 0:
             weight_prob = self.weights / weight_sum
             self.probabilities = (1 - self.gamma) * weight_prob + self.gamma * uniform_prob
         else:
             self.probabilities = np.ones(self.n_arms) / self.n_arms
+        
+        # Track probability changes for convergence detection
+        prob_change = np.max(np.abs(self.probabilities - old_probabilities))
+        self.probability_change_history.append(prob_change)
+        
+        # Check for convergence
+        if self.convergence_episode is None and len(self.probability_change_history) >= self.probability_stability_window:
+            recent_changes = self.probability_change_history[-self.probability_stability_window:]
+            if np.mean(recent_changes) < self.convergence_threshold:
+                self.convergence_episode = self.episode_count
+                print(f"Convergence detected at episode {self.convergence_episode}")
     
-    def _calculate_reward(self) -> float:
-        """
-        Calculate reward based on network efficiency.
-        Reward = Network Efficiency = Total Throughput / Total Power
-        """
+    def _calculate_switching_cost(self, new_cells_off: List[int]) -> float:
+        """Calculate the cost of switching configuration."""
+        if not self.previous_cells_off:
+            return 0.0
+        
+        cells_turned_on = set(self.previous_cells_off) - set(new_cells_off)
+        cells_turned_off = set(new_cells_off) - set(self.previous_cells_off)
+        
+        # Simple switching cost model: each change has unit cost
+        switching_cost = len(cells_turned_on) + len(cells_turned_off)
+        
+        # Normalized by maximum possible switches
+        max_switches = min(len(self.previous_cells_off), len(new_cells_off)) * 2
+        if max_switches > 0:
+            return switching_cost / max_switches
+        return 0.0
+    
+    def _calculate_metrics(self) -> Dict:
+        """Calculate comprehensive network metrics."""
         total_throughput = 0.0
         total_power = 0.0
         active_cells = 0
+        cell_throughputs = {}
         
         for cell in self.sim.cells:
+            cell_id = cell.i
+            
             # Skip cells that are turned off
-            if cell.i in self.current_cells_off:
-                # Add small standby power for turned off cells
+            if cell_id in self.current_cells_off:
                 total_power += 0.001  # 1W standby power
+                cell_throughputs[cell_id] = 0.0
                 continue
             
             # Calculate throughput for active cells
             if hasattr(cell, 'get_average_throughput'):
                 cell_tp = cell.get_average_throughput()
-                if cell_tp and cell_tp > 0:
-                    total_throughput += cell_tp
+            elif hasattr(cell, 'attached') and len(cell.attached) > 0:
+                # Calculate from attached UEs
+                cell_tp = sum(cell.get_UE_throughput(ue_id).sum() 
+                             for ue_id in cell.attached if hasattr(cell, 'get_UE_throughput'))
+            else:
+                cell_tp = 0.0
+            
+            cell_throughputs[cell_id] = cell_tp
+            total_throughput += cell_tp if cell_tp > 0 else 0
             
             # Calculate power consumption
             if hasattr(cell, 'energy_model'):
                 cell_power = cell.energy_model.get_cell_power_watts(self.sim.env.now)
                 total_power += cell_power / 1000.0  # Convert to kW
             else:
-                # Default power model if energy model not available
-                power_dBm = cell.get_power_dBm()
-                power_watts = 10 ** ((power_dBm - 30) / 10)
-                total_power += power_watts / 1000.0  # Convert to kW
+                power_dBm = cell.get_power_dBm() if hasattr(cell, 'get_power_dBm') else 43.0
+                if power_dBm > -np.inf:
+                    power_watts = 10 ** ((power_dBm - 30) / 10)
+                    # Add static power consumption
+                    total_cell_power = 130 + 4.7 * power_watts  # Simple linear model
+                    total_power += total_cell_power / 1000.0  # Convert to kW
             
             active_cells += 1
         
-        # Calculate efficiency (bits/J)
-        if total_power > 0:
-            efficiency = (total_throughput * 1e6) / (total_power * 1000)  # Convert to bits/J
-        else:
-            efficiency = 0.0
+        # Calculate efficiency
+        efficiency = (total_throughput * 1e6) / (total_power * 1000) if total_power > 0 else 0.0
         
-        # Store metrics for analysis
-        self.efficiency_history.append(efficiency)
-        self.throughput_history.append(total_throughput)
-        self.power_history.append(total_power)
+        # Average cell throughput
+        avg_cell_throughput = total_throughput / active_cells if active_cells > 0 else 0.0
         
-        return efficiency
+        return {
+            'total_throughput': total_throughput,
+            'total_power': total_power,
+            'efficiency': efficiency,
+            'active_cells': active_cells,
+            'avg_cell_throughput': avg_cell_throughput,
+            'cell_throughputs': cell_throughputs
+        }
+    
+    def _calculate_baseline_metrics(self):
+        """Calculate baseline metrics with all cells on."""
+        if self.baseline_power is not None:
+            return  # Already calculated
+        
+        # Temporarily store current configuration
+        temp_cells_off = self.current_cells_off.copy()
+        
+        # Turn all cells on
+        self.current_cells_off = []
+        metrics = self._calculate_metrics()
+        
+        self.all_on_metrics = {
+            'power': metrics['total_power'],
+            'throughput': metrics['total_throughput'],
+            'efficiency': metrics['efficiency']
+        }
+        
+        # Calculate random baseline (random k cells off)
+        random_configs = []
+        for _ in range(10):  # Sample 10 random configurations
+            random_cells_off = np.random.choice(self.n_total_cells, 
+                                               self.k_cells_to_off, 
+                                               replace=False).tolist()
+            self.current_cells_off = random_cells_off
+            rand_metrics = self._calculate_metrics()
+            random_configs.append(rand_metrics)
+        
+        # Average random baseline
+        self.baseline_power = np.mean([m['total_power'] for m in random_configs])
+        self.baseline_throughput = np.mean([m['total_throughput'] for m in random_configs])
+        self.baseline_efficiency = np.mean([m['efficiency'] for m in random_configs])
+        
+        # Restore original configuration
+        self.current_cells_off = temp_cells_off
+    
+    def _calculate_reward(self) -> float:
+        """Calculate reward based on network efficiency."""
+        metrics = self._calculate_metrics()
+        
+        # Store metrics
+        self.efficiency_history.append(metrics['efficiency'])
+        self.throughput_history.append(metrics['total_throughput'])
+        self.power_history.append(metrics['total_power'])
+        
+        # Store cell throughputs
+        for cell_id, tp in metrics['cell_throughputs'].items():
+            self.cell_throughput_history[cell_id].append(tp)
+        
+        return metrics['efficiency']
     
     def _normalize_reward(self, reward: float) -> float:
-        """
-        Normalize reward to [0, 1] range using moving window.
-        """
+        """Normalize reward to [0, 1] range."""
         self.reward_buffer.append(reward)
         
-        # Keep only recent rewards
         if len(self.reward_buffer) > self.normalization_window:
             self.reward_buffer.pop(0)
         
-        # Update min/max from buffer
-        if len(self.reward_buffer) > 0:
+        if len(self.reward_buffer) > 1:
             buffer_min = min(self.reward_buffer)
             buffer_max = max(self.reward_buffer)
             
             if buffer_max > buffer_min:
                 normalized = (reward - buffer_min) / (buffer_max - buffer_min)
             else:
-                normalized = 0.5  # Default if all rewards are the same
+                normalized = 0.5
         else:
             normalized = 0.5
         
         return np.clip(normalized, 0.0, 1.0)
     
     def _update_weights(self, arm: int, reward: float):
-        """
-        Update EXP3 weights based on received reward.
-        """
-        # Normalize reward
+        """Update EXP3 weights based on received reward."""
         normalized_reward = self._normalize_reward(reward)
         
         # Store reward
         self.arm_rewards[arm].append(normalized_reward)
         self.reward_history.append(normalized_reward)
+        
+        # Update cumulative reward
+        self.cumulative_reward += normalized_reward
+        
+        # Update best reward estimate for regret calculation
+        if normalized_reward > self.best_reward_estimate:
+            self.best_reward_estimate = normalized_reward * 0.9 + self.best_reward_estimate * 0.1
+        
+        # Calculate and store regret
+        instant_regret = self.best_reward_estimate - normalized_reward
+        self.cumulative_regret += instant_regret
         
         # Update weight for selected arm
         if self.probabilities[arm] > 0:
@@ -1021,9 +1117,13 @@ class EXP3CellOnOff(Scenario):
             self.weights /= max_weight / 1e10
     
     def _apply_cell_configuration(self, cells_to_off: List[int]):
-        """
-        Apply the cell on/off configuration.
-        """
+        """Apply the cell on/off configuration."""
+        self.previous_cells_off = self.current_cells_off.copy()
+        
+        # Calculate switching cost
+        switching_cost = self._calculate_switching_cost(cells_to_off)
+        self.switching_cost_history.append(switching_cost)
+        
         # Turn on previously off cells
         for cell_id in self.current_cells_off:
             if cell_id not in cells_to_off:
@@ -1033,96 +1133,122 @@ class EXP3CellOnOff(Scenario):
         # Turn off selected cells
         for cell_id in cells_to_off:
             if cell_id not in self.current_cells_off:
-                # Detach UEs before turning off
                 cell = self.sim.cells[cell_id]
                 attached_ues = list(cell.attached)
                 for ue_id in attached_ues:
                     ue = self.sim.UEs[ue_id]
                     ue.detach()
-                    # Trigger handover through MME
-                    if hasattr(self.sim, 'MMEs') and len(self.sim.MMEs) > 0:
-                        # UE will be handled by MME in next interval
-                        pass
                 
-                # Turn off cell
                 cell.set_power_dBm(-np.inf)
                 print(f"Time {self.sim.env.now:.1f}: Cell[{cell_id}] turned OFF")
         
         self.current_cells_off = cells_to_off
     
+    def get_extended_statistics(self) -> Dict:
+        """Get comprehensive statistics including all extended metrics."""
+        stats = {
+            'episode_count': self.episode_count,
+            'current_arm': self.current_arm,
+            'current_cells_off': self.current_cells_off,
+            'cumulative_reward': self.cumulative_reward,
+            'cumulative_regret': self.cumulative_regret,
+            'avg_reward': np.mean(self.reward_history) if self.reward_history else 0,
+            'avg_regret': self.cumulative_regret / max(1, self.episode_count),
+            'reward_variance': np.var(self.reward_history) if len(self.reward_history) > 1 else 0,
+            'reward_std': np.std(self.reward_history) if len(self.reward_history) > 1 else 0,
+            'probabilities': self.probabilities.copy(),
+            'arm_selections': self.arm_selections.copy(),
+            'convergence_episode': self.convergence_episode,
+        }
+        
+        # Calculate energy savings
+        if self.baseline_power and self.power_history:
+            current_power = self.power_history[-1] if self.power_history else 0
+            all_on_power = self.all_on_metrics['power'] if self.all_on_metrics['power'] else current_power
+            
+            stats['energy_savings_vs_all_on'] = (1 - current_power / all_on_power) * 100 if all_on_power > 0 else 0
+            stats['energy_savings_vs_random'] = (1 - current_power / self.baseline_power) * 100 if self.baseline_power > 0 else 0
+        
+        # Average metrics
+        if self.efficiency_history:
+            stats['avg_efficiency'] = np.mean(self.efficiency_history)
+            stats['efficiency_std'] = np.std(self.efficiency_history)
+        
+        if self.throughput_history:
+            stats['avg_throughput'] = np.mean(self.throughput_history)
+            stats['throughput_std'] = np.std(self.throughput_history)
+        
+        if self.power_history:
+            stats['avg_power'] = np.mean(self.power_history)
+            stats['power_std'] = np.std(self.power_history)
+        
+        # Average cell throughput
+        if self.cell_throughput_history:
+            all_cell_tps = []
+            for cell_tps in self.cell_throughput_history.values():
+                all_cell_tps.extend(cell_tps)
+            stats['avg_cell_throughput'] = np.mean(all_cell_tps) if all_cell_tps else 0
+            stats['cell_throughput_std'] = np.std(all_cell_tps) if all_cell_tps else 0
+        
+        # Switching cost
+        if self.switching_cost_history:
+            stats['avg_switching_cost'] = np.mean(self.switching_cost_history)
+            stats['total_switching_cost'] = np.sum(self.switching_cost_history)
+        
+        return stats
+    
     def loop(self):
-        """
-        Main loop for EXP3 cell on/off scenario.
-        """
+        """Main loop for Enhanced EXP3 cell on/off scenario."""
         # Initial delay
         if self.delay > 0:
             yield self.sim.wait(self.delay)
         
+        # Calculate baseline metrics
+        self._calculate_baseline_metrics()
+        
         while True:
-            # Count events
             self.event_count += 1
             
-            # Only update configuration after sufficient events
+            # Trigger arm selection after threshold events
             if self.event_count >= self.event_threshold:
-                # Calculate reward for previous configuration
-                if self.current_arm is not None:
-                    reward = self._calculate_reward()
-                    self._update_weights(self.current_arm, reward)
-                    
-                    print(f"Time {self.sim.env.now:.1f}: Arm {self.current_arm} "
-                          f"reward={reward:.4f} (normalized={self._normalize_reward(reward):.4f})")
-                
                 # Select new arm
-                self.current_arm = self._select_arm()
-                self.arm_selections[self.current_arm] += 1
-                self.arm_selection_history.append(self.current_arm)
+                arm = self._select_arm()
+                self.current_arm = arm
+                self.arm_selections[arm] += 1
+                self.arm_selection_history.append(arm)
                 
                 # Get cell combination for selected arm
-                cells_to_off = self._get_arm_combination(self.current_arm)
+                cells_to_off = self._get_arm_combination(arm)
                 
                 # Apply configuration
                 self._apply_cell_configuration(cells_to_off)
                 
-                print(f"Time {self.sim.env.now:.1f}: Selected arm {self.current_arm}, "
-                      f"cells off: {cells_to_off}, "
-                      f"episode: {self.episode_count}, "
-                      f"warm-up: {self.enable_warm_up and self.episode_count <= self.warm_up_episodes}")
+                # Wait for network to stabilize
+                yield self.sim.wait(self.interval * 2)
                 
-                # Reset event counter
+                # Calculate reward
+                reward = self._calculate_reward()
+                
+                # Update weights
+                self._update_weights(arm, reward)
+                
+                # Update probabilities
+                self._update_probabilities()
+                self.probability_history.append(self.probabilities.copy())
+                
+                # Reset event counter and increment episode
                 self.event_count = 0
+                self.episode_count += 1
+                
+                # Print progress
+                if self.episode_count % 10 == 0:
+                    stats = self.get_extended_statistics()
+                    print(f"Episode {self.episode_count}: "
+                          f"Efficiency={stats['avg_efficiency']:.2f} bits/J, "
+                          f"Energy Savings={stats.get('energy_savings_vs_all_on', 0):.1f}%, "
+                          f"Convergence={'Yes' if self.convergence_episode else 'No'}")
             
             yield self.sim.wait(self.interval)
-    
-    def get_statistics(self) -> Dict:
-        """
-        Get current EXP3 statistics.
-        """
-        stats = {
-            'episode_count': self.episode_count,
-            'arm_selections': self.arm_selections.tolist(),
-            'current_arm': self.current_arm,
-            'current_cells_off': self.current_cells_off,
-            'weights': self.weights.tolist(),
-            'probabilities': self.probabilities.tolist(),
-            'avg_reward': np.mean(self.reward_history) if self.reward_history else 0,
-            'avg_efficiency': np.mean(self.efficiency_history) if self.efficiency_history else 0,
-            'avg_throughput': np.mean(self.throughput_history) if self.throughput_history else 0,
-            'avg_power': np.mean(self.power_history) if self.power_history else 0,
-        }
-        
-        # Add per-arm statistics
-        arm_stats = {}
-        for arm, rewards in self.arm_rewards.items():
-            if rewards:
-                arm_stats[arm] = {
-                    'count': self.arm_selections[arm],
-                    'avg_reward': np.mean(rewards),
-                    'std_reward': np.std(rewards),
-                }
-        stats['arm_statistics'] = arm_stats
-        
-        return stats
-    
     
 
 class ChangeCellPower(Scenario):
@@ -1528,99 +1654,224 @@ class MyLogger(Logger):
         # Write the MyLogger dataframe to TSV file
         df1.to_csv(self.logfile_path, sep="\t", index=False, mode='w')
 
-
 class MyLoggerWithEXP3(MyLogger):
     """
-    Extended logger class with EXP3 metrics tracking.
-    Inherits from MyLogger to maintain compatibility.
+    Extended logger class with comprehensive EXP3 metrics tracking.
+    Saves detailed metrics for each seed experiment.
     """
     
-    def __init__(self, sim, exp3_scenario=None, cell_energy_models=None, *args, **kwargs):
-        # Initialize parent class with all required parameters
+    def __init__(self, sim, exp3_scenario=None, cell_energy_models=None, seed=None, *args, **kwargs):
         super().__init__(sim, cell_energy_models=cell_energy_models, *args, **kwargs)
         self.exp3_scenario = exp3_scenario
+        self.seed = seed if seed is not None else sim.seed
         self.exp3_metrics = []
-        self.exp3_dataframe = None
+        self.episode_metrics = []
+        self.convergence_metrics = []
+        
+        # Extract seed number from logfile path if not provided
+        if self.seed is None:
+            # Try to extract seed from filename like "exp3_s1_p24_0.tsv"
+            import re
+            match = re.search(r'_s(\d+)_', self.logfile_path)
+            if match:
+                self.seed = int(match.group(1))
+            else:
+                self.seed = 1  # default
+        
+        # Create metrics file paths - use replace to maintain existing file naming pattern
+        self.exp3_metrics_path = self.logfile_path.replace('.tsv', '_exp3_metrics.tsv')
+        self.episode_metrics_path = self.logfile_path.replace('.tsv', '_episode_metrics.tsv')
+        self.convergence_path = self.logfile_path.replace('.tsv', '_convergence_metrics.tsv')
     
-    def get_exp3_data(self):
-        """
-        Collect EXP3 algorithm metrics.
-        """
+    def get_exp3_detailed_data(self):
+        """Collect detailed EXP3 algorithm metrics."""
         if self.exp3_scenario is None:
             return None
         
-        stats = self.exp3_scenario.get_statistics()
+        stats = self.exp3_scenario.get_extended_statistics()
         
-        # Create metrics record
+        # Core metrics
         metrics = {
             'time': self.sim.env.now,
+            'seed': self.seed,
             'episode': stats['episode_count'],
             'current_arm': stats['current_arm'],
             'cells_off': str(stats['current_cells_off']),
+            'cumulative_reward': stats['cumulative_reward'],
+            'cumulative_regret': stats['cumulative_regret'],
             'avg_reward': stats['avg_reward'],
-            'avg_efficiency': stats['avg_efficiency'],
-            'avg_throughput': stats['avg_throughput'],
-            'avg_power': stats['avg_power'],
+            'avg_regret': stats['avg_regret'],
+            'reward_variance': stats['reward_variance'],
+            'reward_std': stats['reward_std'],
+            'avg_efficiency': stats.get('avg_efficiency', 0),
+            'efficiency_std': stats.get('efficiency_std', 0),
+            'avg_throughput': stats.get('avg_throughput', 0),
+            'throughput_std': stats.get('throughput_std', 0),
+            'avg_power': stats.get('avg_power', 0),
+            'power_std': stats.get('power_std', 0),
+            'avg_cell_throughput': stats.get('avg_cell_throughput', 0),
+            'cell_throughput_std': stats.get('cell_throughput_std', 0),
+            'energy_savings_vs_all_on': stats.get('energy_savings_vs_all_on', 0),
+            'energy_savings_vs_random': stats.get('energy_savings_vs_random', 0),
+            'avg_switching_cost': stats.get('avg_switching_cost', 0),
+            'total_switching_cost': stats.get('total_switching_cost', 0),
+            'convergence_episode': stats.get('convergence_episode', -1)
         }
         
-        # Add top 5 arms by selection count
-        top_arms = np.argsort(stats['arm_selections'])[-5:][::-1]
-        for i, arm in enumerate(top_arms):
-            metrics[f'top{i+1}_arm'] = arm
-            metrics[f'top{i+1}_count'] = stats['arm_selections'][arm]
-            metrics[f'top{i+1}_prob'] = stats['probabilities'][arm]
+        # Add probability distribution for top arms
+        top_k = min(10, len(stats['probabilities']))  # Top 10 arms
+        top_arms_idx = np.argsort(stats['probabilities'])[-top_k:][::-1]
+        
+        for i, arm_idx in enumerate(top_arms_idx):
+            metrics[f'top{i+1}_arm'] = arm_idx
+            metrics[f'top{i+1}_prob'] = stats['probabilities'][arm_idx]
+            metrics[f'top{i+1}_selections'] = stats['arm_selections'][arm_idx]
+            
+            # Get cells for this arm
+            cells_off = self.exp3_scenario._get_arm_combination(arm_idx)
+            metrics[f'top{i+1}_cells_off'] = str(cells_off)
         
         return metrics
     
+    def get_episode_metrics(self):
+        """Get per-episode metrics for detailed analysis."""
+        if not self.exp3_scenario or not self.exp3_scenario.reward_history:
+            return None
+        
+        episode_data = {
+            'seed': self.seed,
+            'episode': self.exp3_scenario.episode_count,
+            'time': self.sim.env.now,
+            'selected_arm': self.exp3_scenario.current_arm,
+            'cells_off': str(self.exp3_scenario.current_cells_off),
+            'instant_reward': self.exp3_scenario.reward_history[-1] if self.exp3_scenario.reward_history else 0,
+            'instant_efficiency': self.exp3_scenario.efficiency_history[-1] if self.exp3_scenario.efficiency_history else 0,
+            'instant_throughput': self.exp3_scenario.throughput_history[-1] if self.exp3_scenario.throughput_history else 0,
+            'instant_power': self.exp3_scenario.power_history[-1] if self.exp3_scenario.power_history else 0,
+            'switching_cost': self.exp3_scenario.switching_cost_history[-1] if self.exp3_scenario.switching_cost_history else 0,
+        }
+        
+        # Add probability changes
+        if self.exp3_scenario.probability_change_history:
+            episode_data['probability_change'] = self.exp3_scenario.probability_change_history[-1]
+        
+        return episode_data
+    
     def run_routine(self, ignore_index=True):
-        """
-        Extended routine to include EXP3 metrics.
-        """
+        """Extended routine to include comprehensive EXP3 metrics."""
         # Run base routine
         super().run_routine(ignore_index)
         
-        # Collect EXP3 metrics
+        # Collect detailed EXP3 metrics
         if self.exp3_scenario:
-            exp3_data = self.get_exp3_data()
+            # Main metrics
+            exp3_data = self.get_exp3_detailed_data()
             if exp3_data:
                 self.exp3_metrics.append(exp3_data)
+            
+            # Episode metrics (only when episode changes)
+            if (len(self.episode_metrics) == 0 or 
+                (self.episode_metrics and 
+                 self.episode_metrics[-1]['episode'] < self.exp3_scenario.episode_count)):
+                episode_data = self.get_episode_metrics()
+                if episode_data:
+                    self.episode_metrics.append(episode_data)
+    
+    def save_convergence_analysis(self):
+        """Analyze and save convergence metrics."""
+        if not self.exp3_scenario:
+            return
+        
+        convergence_data = []
+        
+        # Analyze probability stability over time
+        prob_history = self.exp3_scenario.probability_history
+        if prob_history and len(prob_history) > 10:
+            window_size = 10
+            for i in range(window_size, len(prob_history)):
+                window = prob_history[i-window_size:i]
+                
+                # Calculate variance in probabilities over window
+                prob_variance = np.var([p for probs in window for p in probs])
+                
+                # Find dominant arm
+                avg_probs = np.mean(window, axis=0)
+                dominant_arm = np.argmax(avg_probs)
+                dominant_prob = avg_probs[dominant_arm]
+                
+                convergence_data.append({
+                    'seed': self.seed,
+                    'episode': i,
+                    'prob_variance': prob_variance,
+                    'dominant_arm': dominant_arm,
+                    'dominant_prob': dominant_prob,
+                    'convergence_detected': self.exp3_scenario.convergence_episode is not None and i >= self.exp3_scenario.convergence_episode
+                })
+        
+        if convergence_data:
+            df = pd.DataFrame(convergence_data)
+            df.to_csv(self.convergence_path, sep='\t', index=False)
+            print(f"Convergence metrics saved to: {self.convergence_path}")
     
     def finalize(self):
-        """
-        Extended finalization to save EXP3 metrics.
-        """
+        """Extended finalization to save all comprehensive metrics."""
         # Run base finalization
         super().finalize()
         
-        # Save EXP3 metrics
+        # Save main EXP3 metrics
         if self.exp3_metrics:
             exp3_df = pd.DataFrame(self.exp3_metrics)
+            exp3_df.to_csv(self.exp3_metrics_path, sep='\t', index=False)
+            print(f"EXP3 metrics saved to: {self.exp3_metrics_path}")
+        
+        # Save episode metrics
+        if self.episode_metrics:
+            episode_df = pd.DataFrame(self.episode_metrics)
+            episode_df.to_csv(self.episode_metrics_path, sep='\t', index=False)
+            print(f"Episode metrics saved to: {self.episode_metrics_path}")
+        
+        # Save convergence analysis
+        self.save_convergence_analysis()
+        
+        # Print comprehensive summary
+        if self.exp3_scenario:
+            print("\n" + "="*80)
+            print(f"SEED {self.seed} - EXP3 SIMULATION SUMMARY")
+            print("="*80)
             
-            # Save to separate TSV file
-            exp3_path = self.logfile_path.replace('.tsv', '_exp3_metrics.tsv')
-            exp3_df.to_csv(exp3_path, sep='\t', index=False)
-            print(f"EXP3 metrics saved to: {exp3_path}")
+            stats = self.exp3_scenario.get_extended_statistics()
             
-            # Print summary statistics
-            print("\n=== EXP3 Algorithm Summary ===")
-            print(f"Total episodes: {self.exp3_scenario.episode_count}")
-            if self.exp3_scenario.efficiency_history:
-                print(f"Average efficiency: {np.mean(self.exp3_scenario.efficiency_history):.4f}")
-            if self.exp3_scenario.throughput_history:
-                print(f"Average throughput: {np.mean(self.exp3_scenario.throughput_history):.2f} Mb/s")
-            if self.exp3_scenario.power_history:
-                print(f"Average power: {np.mean(self.exp3_scenario.power_history):.2f} kW")
+            print(f"Total episodes: {stats['episode_count']}")
+            print(f"Convergence: {'Episode ' + str(stats['convergence_episode']) if stats['convergence_episode'] else 'Not detected'}")
+            print("\nPerformance Metrics:")
+            print(f"  Cumulative Reward: {stats['cumulative_reward']:.4f}")
+            print(f"  Cumulative Regret: {stats['cumulative_regret']:.4f}")
+            print(f"  Average Regret: {stats['avg_regret']:.4f}")
+            print(f"  Reward Std Dev: {stats['reward_std']:.4f}")
             
-            # Print arm statistics
-            stats = self.exp3_scenario.get_statistics()
-            print("\nTop 5 selected arms:")
+            print("\nNetwork Metrics:")
+            print(f"  Avg Efficiency: {stats.get('avg_efficiency', 0):.4f} ± {stats.get('efficiency_std', 0):.4f} bits/J")
+            print(f"  Avg Throughput: {stats.get('avg_throughput', 0):.2f} ± {stats.get('throughput_std', 0):.2f} Mb/s")
+            print(f"  Avg Power: {stats.get('avg_power', 0):.2f} ± {stats.get('power_std', 0):.2f} kW")
+            print(f"  Avg Cell Throughput: {stats.get('avg_cell_throughput', 0):.2f} ± {stats.get('cell_throughput_std', 0):.2f} Mb/s")
+            
+            print("\nEnergy Savings:")
+            print(f"  vs All-On: {stats.get('energy_savings_vs_all_on', 0):.1f}%")
+            print(f"  vs Random: {stats.get('energy_savings_vs_random', 0):.1f}%")
+            
+            print("\nSwitching Cost:")
+            print(f"  Average: {stats.get('avg_switching_cost', 0):.4f}")
+            print(f"  Total: {stats.get('total_switching_cost', 0):.2f}")
+            
+            print("\nTop 5 Selected Arms:")
             top_arms = np.argsort(stats['arm_selections'])[-5:][::-1]
             for i, arm in enumerate(top_arms):
                 count = stats['arm_selections'][arm]
                 prob = stats['probabilities'][arm]
                 cells = self.exp3_scenario._get_arm_combination(arm)
                 print(f"  {i+1}. Arm {arm}: {count} selections ({prob:.4f} prob), cells off: {cells}")
-
+            
+            print("="*80 + "\n")
 # END MyLogger class
 
 
@@ -2193,11 +2444,15 @@ def main(config_dict):
         print("\n" + "="*60)
         print("EXP3 SIMULATION COMPLETED")
         print("="*60)
-        stats = exp3_scenario.get_statistics()
+        stats = exp3_scenario.get_extended_statistics()  # 메서드명 변경
         print(f"Total episodes: {stats['episode_count']}")
-        print(f"Average efficiency: {stats['avg_efficiency']:.4f} bits/J")
-        print(f"Average throughput: {stats['avg_throughput']:.2f} Mb/s")
-        print(f"Average power: {stats['avg_power']:.2f} kW")
+        print(f"Cumulative reward: {stats['cumulative_reward']:.4f}")
+        print(f"Cumulative regret: {stats['cumulative_regret']:.4f}")
+        print(f"Average efficiency: {stats.get('avg_efficiency', 0):.4f} bits/J")
+        print(f"Average throughput: {stats.get('avg_throughput', 0):.2f} Mb/s")
+        print(f"Average power: {stats.get('avg_power', 0):.2f} kW")
+        print(f"Energy savings (vs all-on): {stats.get('energy_savings_vs_all_on', 0):.1f}%")
+        print(f"Convergence: Episode {stats['convergence_episode']}" if stats['convergence_episode'] else "Convergence: Not detected")
         print("="*60 + "\n")
     
     # Generate plots if requested

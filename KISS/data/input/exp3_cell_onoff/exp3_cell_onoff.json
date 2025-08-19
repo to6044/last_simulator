@@ -8,7 +8,6 @@
     "debug_logging_level": "INFO",
     "line_profiler": false,
     "sim_show_params": true,
-    "seed": 1,
     "isd": 500,
     "sim_radius": 1000,
     "h_BS": 25,
@@ -22,7 +21,8 @@
 
     "nues": 400,
     "h_UT": 1.5,
-    "until": 10000,
+    "seed": 3,
+    "until": 100,
     "base_interval": 1.0,
     "mcs_table_number": null,
     "ue_noise_power_dBm": -118,
