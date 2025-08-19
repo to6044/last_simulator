@@ -490,7 +490,8 @@ class EXP3MultiSeedAnalyzer:
                 'Avg. Efficiency': f"{last_row['avg_efficiency']:.2f} ± {last_row.get('efficiency_std', 0):.2f}",
                 'Avg. Throughput': f"{last_row['avg_throughput']:.2f} ± {last_row.get('throughput_std', 0):.2f}",
                 'Avg. Power': f"{last_row['avg_power']:.2f} ± {last_row.get('power_std', 0):.2f}",
-                'Energy Savings': f"{last_row.get('energy_savings_vs_all_on', 0):.1f}%",
+                'Energy Savings (vs All-On)': f"{last_row.get('energy_savings_vs_all_on', 0):.1f}%",
+                'Energy Savings (vs Random)': f"{last_row.get('energy_savings_vs_random', 0):.1f}%",
                 'Avg. Switch Cost': f"{last_row.get('avg_switching_cost', 0):.3f}"
             })
         
@@ -506,7 +507,8 @@ class EXP3MultiSeedAnalyzer:
             'Avg. Efficiency': f"{np.mean([float(d['Avg. Efficiency'].split(' ±')[0]) for d in summary_data]):.2f}",
             'Avg. Throughput': f"{np.mean([float(d['Avg. Throughput'].split(' ±')[0]) for d in summary_data]):.2f}",
             'Avg. Power': f"{np.mean([float(d['Avg. Power'].split(' ±')[0]) for d in summary_data]):.2f}",
-            'Energy Savings': f"{np.mean([float(d['Energy Savings'].rstrip('%')) for d in summary_data]):.1f}%",
+            'Energy Savings (vs All-On)': f"{last_row.get('energy_savings_vs_all_on', 0):.1f}%",
+            'Energy Savings (vs Random)': f"{last_row.get('energy_savings_vs_random', 0):.1f}%",
             'Avg. Switch Cost': f"{np.mean([float(d['Avg. Switch Cost']) for d in summary_data]):.3f}"
         }
         

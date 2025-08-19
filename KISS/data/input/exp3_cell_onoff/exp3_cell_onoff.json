@@ -21,8 +21,8 @@
 
     "nues": 400,
     "h_UT": 1.5,
-    "seed": 3,
-    "until": 100,
+    "seed": 5,
+    "until": 1000,
     "base_interval": 1.0,
     "mcs_table_number": null,
     "ue_noise_power_dBm": -118,
@@ -35,7 +35,7 @@
         "enable_warm_up": true,
         "min_selection_guarantee": true,
         "normalization_window": 50,
-        "event_threshold": 10
+        "event_threshold": 5
     },
     "scenario_n_cells": 0,
     "scenario_delay": 0.0,
