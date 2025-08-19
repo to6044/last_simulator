@@ -819,7 +819,8 @@ class CellEnergyModel:
 
 class EXP3CellOnOff(Scenario):
     """
-    Enhanced EXP3 algorithm based cell on/off scenario with extended metrics tracking.
+    Enhanced EXP3 (Exponential-weight algorithm for Exploration and Exploitation)
+    for cell on/off control without real-time regret calculation.
     """
     
     def __init__(self, sim, k_cells_to_off: int, n_total_cells: int = None,
@@ -854,11 +855,9 @@ class EXP3CellOnOff(Scenario):
         self.current_cells_off = []
         self.previous_cells_off = []
         
-        # Extended performance tracking
+        # Performance tracking
         self.reward_history = []
         self.cumulative_reward = 0.0
-        self.cumulative_regret = 0.0
-        self.best_reward_estimate = 0.0
         self.efficiency_history = []
         self.throughput_history = []
         self.power_history = []
@@ -1088,7 +1087,8 @@ class EXP3CellOnOff(Scenario):
         return np.clip(normalized, 0.0, 1.0)
     
     def _update_weights(self, arm: int, reward: float):
-        """Update EXP3 weights based on received reward."""
+        """Update weights for the selected arm without regret calculation."""
+        # Normalize reward
         normalized_reward = self._normalize_reward(reward)
         
         # Store reward
@@ -1098,15 +1098,7 @@ class EXP3CellOnOff(Scenario):
         # Update cumulative reward
         self.cumulative_reward += normalized_reward
         
-        # Update best reward estimate for regret calculation
-        if normalized_reward > self.best_reward_estimate:
-            self.best_reward_estimate = normalized_reward * 0.9 + self.best_reward_estimate * 0.1
-        
-        # Calculate and store regret
-        instant_regret = self.best_reward_estimate - normalized_reward
-        self.cumulative_regret += instant_regret
-        
-        # Update weight for selected arm
+        # Update weight for selected arm (removed regret calculation)
         if self.probabilities[arm] > 0:
             estimated_reward = normalized_reward / self.probabilities[arm]
             self.weights[arm] *= np.exp(self.gamma * estimated_reward / self.n_arms)
@@ -1145,15 +1137,13 @@ class EXP3CellOnOff(Scenario):
         self.current_cells_off = cells_to_off
     
     def get_extended_statistics(self) -> Dict:
-        """Get comprehensive statistics including all extended metrics."""
+        """Get comprehensive statistics without regret metrics."""
         stats = {
             'episode_count': self.episode_count,
             'current_arm': self.current_arm,
             'current_cells_off': self.current_cells_off,
             'cumulative_reward': self.cumulative_reward,
-            'cumulative_regret': self.cumulative_regret,
             'avg_reward': np.mean(self.reward_history) if self.reward_history else 0,
-            'avg_regret': self.cumulative_regret / max(1, self.episode_count),
             'reward_variance': np.var(self.reward_history) if len(self.reward_history) > 1 else 0,
             'reward_std': np.std(self.reward_history) if len(self.reward_history) > 1 else 0,
             'probabilities': self.probabilities.copy(),
@@ -1196,6 +1186,7 @@ class EXP3CellOnOff(Scenario):
             stats['total_switching_cost'] = np.sum(self.switching_cost_history)
         
         return stats
+
     
     def loop(self):
         """Main loop for Enhanced EXP3 cell on/off scenario."""
@@ -1684,13 +1675,13 @@ class MyLoggerWithEXP3(MyLogger):
         self.convergence_path = self.logfile_path.replace('.tsv', '_convergence_metrics.tsv')
     
     def get_exp3_detailed_data(self):
-        """Collect detailed EXP3 algorithm metrics."""
+        """Collect detailed EXP3 algorithm metrics without regret."""
         if self.exp3_scenario is None:
             return None
         
         stats = self.exp3_scenario.get_extended_statistics()
         
-        # Core metrics
+        # Core metrics (removed regret-related fields)
         metrics = {
             'time': self.sim.env.now,
             'seed': self.seed,
@@ -1698,9 +1689,7 @@ class MyLoggerWithEXP3(MyLogger):
             'current_arm': stats['current_arm'],
             'cells_off': str(stats['current_cells_off']),
             'cumulative_reward': stats['cumulative_reward'],
-            'cumulative_regret': stats['cumulative_regret'],
             'avg_reward': stats['avg_reward'],
-            'avg_regret': stats['avg_regret'],
             'reward_variance': stats['reward_variance'],
             'reward_std': stats['reward_std'],
             'avg_efficiency': stats.get('avg_efficiency', 0),
@@ -1719,7 +1708,7 @@ class MyLoggerWithEXP3(MyLogger):
         }
         
         # Add probability distribution for top arms
-        top_k = min(10, len(stats['probabilities']))  # Top 10 arms
+        top_k = min(10, len(stats['probabilities']))
         top_arms_idx = np.argsort(stats['probabilities'])[-top_k:][::-1]
         
         for i, arm_idx in enumerate(top_arms_idx):
@@ -1814,7 +1803,7 @@ class MyLoggerWithEXP3(MyLogger):
             print(f"Convergence metrics saved to: {self.convergence_path}")
     
     def finalize(self):
-        """Extended finalization to save all comprehensive metrics."""
+        """Finalization without regret summary."""
         # Run base finalization
         super().finalize()
         
@@ -1833,7 +1822,7 @@ class MyLoggerWithEXP3(MyLogger):
         # Save convergence analysis
         self.save_convergence_analysis()
         
-        # Print comprehensive summary
+        # Print comprehensive summary (without regret)
         if self.exp3_scenario:
             print("\n" + "="*80)
             print(f"SEED {self.seed} - EXP3 SIMULATION SUMMARY")
@@ -1845,8 +1834,7 @@ class MyLoggerWithEXP3(MyLogger):
             print(f"Convergence: {'Episode ' + str(stats['convergence_episode']) if stats['convergence_episode'] else 'Not detected'}")
             print("\nPerformance Metrics:")
             print(f"  Cumulative Reward: {stats['cumulative_reward']:.4f}")
-            print(f"  Cumulative Regret: {stats['cumulative_regret']:.4f}")
-            print(f"  Average Regret: {stats['avg_regret']:.4f}")
+            print(f"  Average Reward: {stats['avg_reward']:.4f}")
             print(f"  Reward Std Dev: {stats['reward_std']:.4f}")
             
             print("\nNetwork Metrics:")
@@ -1869,7 +1857,7 @@ class MyLoggerWithEXP3(MyLogger):
                 count = stats['arm_selections'][arm]
                 prob = stats['probabilities'][arm]
                 cells = self.exp3_scenario._get_arm_combination(arm)
-                print(f"  {i+1}. Arm {arm}: {count} selections ({prob:.4f} prob), cells off: {cells}")
+                print(f"  {i+1}. Arm {arm}: {count} selections ({prob:.3f} prob) - Cells off: {cells}")
             
             print("="*80 + "\n")
 # END MyLogger class
@@ -2444,10 +2432,9 @@ def main(config_dict):
         print("\n" + "="*60)
         print("EXP3 SIMULATION COMPLETED")
         print("="*60)
-        stats = exp3_scenario.get_extended_statistics()  # 메서드명 변경
+        stats = exp3_scenario.get_extended_statistics()
         print(f"Total episodes: {stats['episode_count']}")
         print(f"Cumulative reward: {stats['cumulative_reward']:.4f}")
-        print(f"Cumulative regret: {stats['cumulative_regret']:.4f}")
         print(f"Average efficiency: {stats.get('avg_efficiency', 0):.4f} bits/J")
         print(f"Average throughput: {stats.get('avg_throughput', 0):.2f} Mb/s")
         print(f"Average power: {stats.get('avg_power', 0):.2f} kW")
