@@ -827,7 +827,8 @@ class EXP3CellOnOff(Scenario):
                  interval: float = 1.0, delay: float = 0.0,
                  gamma: float = 0.1, warm_up_episodes: int = 100,
                  enable_warm_up: bool = True, min_selection_guarantee: bool = True,
-                 normalization_window: int = 50, event_threshold: int = 10):
+                 normalization_window: int = 50, event_threshold: int = 10,
+                 cell_energy_models: dict = None):
         """
         Initialize Enhanced EXP3 Cell On/Off scenario.
         """
@@ -842,6 +843,10 @@ class EXP3CellOnOff(Scenario):
         self.min_selection_guarantee = min_selection_guarantee
         self.normalization_window = normalization_window
         self.event_threshold = event_threshold
+        
+        if not cell_energy_models:
+            raise ValueError("cell_energy_models parameter is required for TRX energy calculations!")
+        self.cell_energy_models = cell_energy_models or {}  # ← 이 줄 추가!
         
         # Initialize EXP3 parameters
         self.n_arms = self._calculate_n_arms()
@@ -957,54 +962,81 @@ class EXP3CellOnOff(Scenario):
             return switching_cost / max_switches
         return 0.0
     
-    def _calculate_metrics(self) -> Dict:
-        """Calculate comprehensive network metrics."""
+    def _calculate_metrics(self):
+        """Calculate network metrics using only TRX energy model."""
         total_throughput = 0.0
         total_power = 0.0
         active_cells = 0
         cell_throughputs = {}
         
+        # TRX 에너지 모델 존재 여부 확인
+        if not self.cell_energy_models:
+            raise ValueError("Cell energy models not available! Cannot calculate accurate power consumption.")
+        
+        print(f"=== TRX Energy Model Calculation at time {self.sim.env.now:.1f} ===")
+        print(f"Available energy models: {len(self.cell_energy_models)}")
+        print(f"Cells currently OFF: {self.current_cells_off}")
+        
         for cell in self.sim.cells:
             cell_id = cell.i
             
-            # Skip cells that are turned off
+            # 꺼진 셀들 처리
             if cell_id in self.current_cells_off:
                 total_power += 0.001  # 1W standby power
                 cell_throughputs[cell_id] = 0.0
+                print(f"Cell[{cell_id}]: OFF - standby power 1W")
                 continue
             
-            # Calculate throughput for active cells
+            # 활성 셀의 throughput 계산
             if hasattr(cell, 'get_average_throughput'):
                 cell_tp = cell.get_average_throughput()
             elif hasattr(cell, 'attached') and len(cell.attached) > 0:
                 # Calculate from attached UEs
                 cell_tp = sum(cell.get_UE_throughput(ue_id).sum() 
-                             for ue_id in cell.attached if hasattr(cell, 'get_UE_throughput'))
+                            for ue_id in cell.attached if hasattr(cell, 'get_UE_throughput'))
             else:
                 cell_tp = 0.0
             
             cell_throughputs[cell_id] = cell_tp
             total_throughput += cell_tp if cell_tp > 0 else 0
             
-            # Calculate power consumption
-            if hasattr(cell, 'energy_model'):
-                cell_power = cell.energy_model.get_cell_power_watts(self.sim.env.now)
-                total_power += cell_power / 1000.0  # Convert to kW
-            else:
-                power_dBm = cell.get_power_dBm() if hasattr(cell, 'get_power_dBm') else 43.0
-                if power_dBm > -np.inf:
-                    power_watts = 10 ** ((power_dBm - 30) / 10)
-                    # Add static power consumption
-                    total_cell_power = 130 + 4.7 * power_watts  # Simple linear model
-                    total_power += total_cell_power / 1000.0  # Convert to kW
+            # ✅ TRX 에너지 모델만 사용 - fallback 제거!
+            if cell_id not in self.cell_energy_models:
+                raise KeyError(f"Cell[{cell_id}] energy model not found! Check initialization.")
+            
+            # TRX 에너지 모델에서 정확한 전력 계산
+            cell_energy_model = self.cell_energy_models[cell_id]
+            
+            # 현재 시간에서의 실제 전력 소비 계산
+            cell_power_watts = cell_energy_model.get_cell_power_watts(self.sim.env.now)
+            total_power += cell_power_watts / 1000.0  # Convert to kW
+            
+            # 상세 정보 출력 (디버깅용)
+            static_power = cell_energy_model.p_static_watts
+            dynamic_power = cell_energy_model.p_dynamic_watts
+            sectors = cell_energy_model.params.sectors
+            antennas = cell_energy_model.params.antennas
+            
+            print(f"Cell[{cell_id}]: Total={cell_power_watts:.2f}W "
+                f"(Static={static_power:.2f}W × {sectors}sec × {antennas}ant + "
+                f"Dynamic={dynamic_power:.2f}W × {sectors}sec × {antennas}ant)")
+            print(f"  - Cell load: {cell.get_cell_load() if hasattr(cell, 'get_cell_load') else 'N/A'}")
+            print(f"  - Throughput: {cell_tp:.2f} Mbps")
             
             active_cells += 1
         
-        # Calculate efficiency
+        # Calculate efficiency (bits per Joule)
         efficiency = (total_throughput * 1e6) / (total_power * 1000) if total_power > 0 else 0.0
         
         # Average cell throughput
         avg_cell_throughput = total_throughput / active_cells if active_cells > 0 else 0.0
+        
+        print(f"Network Summary:")
+        print(f"  - Total Power: {total_power:.3f} kW")
+        print(f"  - Total Throughput: {total_throughput:.2f} Mbps")
+        print(f"  - Energy Efficiency: {efficiency:.2f} bits/J")
+        print(f"  - Active Cells: {active_cells}")
+        print("="*60)
         
         return {
             'total_throughput': total_throughput,
@@ -2280,7 +2312,8 @@ def main(config_dict):
             enable_warm_up=exp3_params.get("enable_warm_up", True),
             min_selection_guarantee=exp3_params.get("min_selection_guarantee", True),
             normalization_window=exp3_params.get("normalization_window", 50),
-            event_threshold=exp3_params.get("event_threshold", 10)
+            event_threshold=exp3_params.get("event_threshold", 10),
+            cell_energy_models=cell_energy_models_dict
         )
         
         # Use extended logger with EXP3 metrics
