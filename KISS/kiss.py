@@ -657,7 +657,6 @@ class CellEnergyModel:
         rho_raw = self.cell.get_cell_load(overhead=0.15, debug=False)
         rho = min(rho_raw, 1.0)  # Ensure rho does not exceed 1.0
         
-        # 여기랑
         # Sanity check that other input values are in decimal form
         rf_nom = self.params.power_rf_watts
         bb_nom = self.params.power_baseband_watts
@@ -843,10 +842,10 @@ class EXP3CellOnOff(Scenario):
         self.min_selection_guarantee = min_selection_guarantee
         self.normalization_window = normalization_window
         self.event_threshold = event_threshold
-        
+           
         if not cell_energy_models:
             raise ValueError("cell_energy_models parameter is required for TRX energy calculations!")
-        self.cell_energy_models = cell_energy_models or {}  # ← 이 줄 추가!
+        self.cell_energy_models = cell_energy_models
         
         # Initialize EXP3 parameters
         self.n_arms = self._calculate_n_arms()
@@ -1151,7 +1150,7 @@ class EXP3CellOnOff(Scenario):
         # Turn on previously off cells
         for cell_id in self.current_cells_off:
             if cell_id not in cells_to_off:
-                self.sim.cells[cell_id].set_power_dBm(43.0)  # Default power
+                self.sim.cells[cell_id].set_power_dBm(20.0)  # Default power
                 print(f"Time {self.sim.env.now:.1f}: Cell[{cell_id}] turned ON")
         
         # Turn off selected cells
@@ -1503,7 +1502,7 @@ class MyLogger(Logger):
                 serving_cell.reports["rsrp"].clear()                        # clear the serving cell["rsrp"] reports if the serving cell is not transmitting
                                                                             # FIXME - using a dict comprehension doesn't clear the dictionary properly for some reason (e.g. {key: 0 for key in serving_cell.reports["rsrp"]}  )
                 serving_cell.reports["throughput_Mbps"].clear()             # clear the serving cell["throughput"] reports if the serving cell is not transmitting
-                UE.sinr_dB = 0.0                                          # clear the UE["sinr_dB"] reports if the serving cell is not transmitting
+                UE.sinr_dB = 0.0                                            # clear the UE["sinr_dB"] reports if the serving cell is not transmitting
             cell_energy_model = self.cell_energy_models[serving_cell.i]
             seed = self.sim.seed
             neigh_rsrp_array = self.get_neighbour_cell_rsrp_rank(UE.i)
@@ -1516,7 +1515,7 @@ class MyLogger(Logger):
             d2sc = np.linalg.norm(sc_xy - ue_xy)                            # current UE distance to serving_cell
             ue_tp = serving_cell.get_UE_throughput(attached_ue_id)          # current UE throughput ('fundamental')
             sc_power_dBm = serving_cell.get_power_dBm()                     # current UE serving_cell transmit power
-            sc_power_watts = from_dB(sc_power_dBm) / 1e3                 # current UE serving_cell transmit power in watts
+            sc_power_watts = from_dB(sc_power_dBm) / 1e3                    # current UE serving_cell transmit power in watts
             sc_rsrp = serving_cell.get_rsrp(ue_id)                          # current UE rsrp from serving_cell
             neigh1_rsrp = neigh_rsrp_array[-1][0]    
             neigh2_rsrp = neigh_rsrp_array[-2][0]    
@@ -1524,17 +1523,17 @@ class MyLogger(Logger):
             sinr = UE.sinr_dB                                               # current UE sinr from serving_cell
             cqi = UE.cqi                                                    # current UE cqi from serving_cell
             mcs = self.get_cqi_to_mcs(cqi)                                  # current UE mcs for serving_cell
-            cell_eff_bw = serving_cell.get_eff_bandwidth()  # current UE serving_cell effective bandwidth
-            cell_avg_se = serving_cell.get_average_spectral_efficiency()  # current UE serving_cell average spectral efficiency
-            cell_ref_capacity = serving_cell.get_cell_ref_capacity()  # current UE serving_cell capacity
-            cell_load = serving_cell.get_cell_load()                              # current UE serving_cell load
+            cell_eff_bw = serving_cell.get_eff_bandwidth()                  # current UE serving_cell effective bandwidth
+            cell_avg_se = serving_cell.get_average_spectral_efficiency()    # current UE serving_cell average spectral efficiency
+            cell_ref_capacity = serving_cell.get_cell_ref_capacity()        # current UE serving_cell capacity
+            cell_load = serving_cell.get_cell_load()                        # current UE serving_cell load
             cell_tp = serving_cell.get_cell_throughput()                    # current UE serving_cell throughput
-            cell_power_kW = cell_energy_model.get_cell_power_watts(tm) / 1e3          # current UE serving_cell power consumption
-            cell_ee = (cell_tp * 1e6) / (cell_power_kW * 1e3)               # current UE serving_cell energy efficiency
+            cell_power_W = cell_energy_model.get_cell_power_watts(tm)       # current UE serving_cell power consumption
+            cell_ee = (cell_tp * 1e6) / cell_power_W                        # current UE serving_cell energy efficiency
             cell_se = (cell_tp * 1e6) / (serving_cell.bw_MHz * 1e6)         # current UE serving_cell spectral efficiency
 
             # Get the above as a list
-            data_list = [seed, tm, sc_id, sc_sleep_mode, ue_id, d2sc, ue_tp, sc_power_dBm, sc_power_watts, sc_rsrp, neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_eff_bw, cell_avg_se, cell_ref_capacity, cell_load, cell_tp, cell_power_kW, cell_ee, cell_se]
+            data_list = [seed, tm, sc_id, sc_sleep_mode, ue_id, d2sc, ue_tp, sc_power_dBm, sc_power_watts, sc_rsrp, neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_eff_bw, cell_avg_se, cell_ref_capacity, cell_load, cell_tp, cell_power_W, cell_ee, cell_se]
 
             # convert ndarrays to str or float
             for i, j in enumerate(data_list):
@@ -1574,15 +1573,15 @@ class MyLogger(Logger):
         cell_eff_bandwidth = float('nan')
         cell_avg_se = float('nan')
         cell_ref_capacity = float('nan')
-        cell_load = float('nan')# current UE mcs for serving_cell
+        cell_load = float('nan')                                    # current UE mcs for serving_cell
         cell_tp = cell.get_cell_throughput()                        # current UE serving_cell throughput
-        cell_power_kW = cell_energy_model.get_cell_power_watts(tm) / 1e3    # current UE serving_cell power consumption
-        cell_ee = ((cell_tp * 1e6) / (cell_power_kW * 1e3)) * 1e6   # current UE serving_cell energy efficiency
-        cell_se = (cell_tp * 1e6) / (cell.bw_MHz * 1e6)     # current UE serving_cell spectral efficiency
+        cell_power_W = cell_energy_model.get_cell_power_watts(tm)   # current UE serving_cell power consumption
+        cell_ee = (cell_tp * 1e6) / cell_power_W                    # current UE serving_cell energy efficiency
+        cell_se = (cell_tp * 1e6) / (cell.bw_MHz * 1e6)             # current UE serving_cell spectral efficiency
 
         # Get the above as a list
         data_list = [seed, tm, sc_id, sc_sleep_mode, ue_id, d2sc, ue_tp, sc_power_dBm, sc_power_watts, sc_rsrp, 
-                     neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_eff_bandwidth, cell_avg_se, cell_ref_capacity, cell_load, cell_tp, cell_power_kW, 
+                     neigh1_rsrp, neigh2_rsrp, noise, sinr, cqi, mcs, cell_eff_bandwidth, cell_avg_se, cell_ref_capacity, cell_load, cell_tp, cell_power_W, 
                      cell_ee, cell_se]
 
         # convert ndarrays to str or float
@@ -1602,7 +1601,7 @@ class MyLogger(Logger):
         columns = ["seed", "time", "serving_cell_id", "serving_cell_sleep_mode", "ue_id",
             "distance_to_cell(m)", "ue_throughput(Mb/s)", "sc_power(dBm)", "sc_power(watts)","sc_rsrp(dBm)", 
             "neighbour1_rsrp(dBm)", "neighbour2_rsrp(dBm)", "noise_power(dBm)", "sinr(dB)", 
-            "cqi", "mcs", "cell_eff_bandwidth(MHz)", "cell_avg_ se(bits/Hz)", "cell_ref_capacity_OH(Mb/s)", "cell_load()", "cell_rr_capacity(Mb/s)", "cell_power(kW)", "cell_ee(bits/J)", 
+            "cqi", "mcs", "cell_eff_bandwidth(MHz)", "cell_avg_ se(bits/Hz)", "cell_ref_capacity_OH(Mb/s)", "cell_load()", "cell_rr_capacity(Mb/s)", "cell_power(W)", "cell_ee(bits/J)", 
             "cell_se(bits/Hz)"]
         for cell in self.sim.cells:
             if len(cell.attached) != 0:
@@ -2292,7 +2291,7 @@ def main(config_dict):
     # Create a dictionary of cell-specific energy models
     cell_energy_models_dict = {}
     for cell in sim.cells:
-        cell_energy_models_dict[cell.i] = (CellEnergyModel(cell))
+        cell_energy_models_dict[cell.i] = (CellEnergyModel(cell, params = SmallCellParameters()))
         cell.set_f_callback(cell_energy_models_dict[cell.i].f_callback(cell))
 
     # Initialize EXP3 scenario if selected
