@@ -13,7 +13,13 @@ import pandas as pd
 from AIMM_simulator import *
 from hexalattice.hexalattice import *
 import utils_kiss
-
+try:
+    from exp3_cell_onoff import EXP3CellOnOffRIC, EXP3CellOnOffScenario
+    from exp3_logger import EXP3Logger
+    EXP3_AVAILABLE = True
+except ImportError:
+    EXP3_AVAILABLE = False
+    print("EXP3 modules not found. EXP3 cell on/off scenario will not be available.", file=stderr)
 
 # Fix custom imports
 bisect_left = _bisect.bisect_left
@@ -1595,6 +1601,8 @@ def main(config_dict):
     plot_author = config_dict.get("plot_author")
     mcs_table_number = config_dict["mcs_table_number"]
 
+
+    
     # Create a simulator object
     sim = Simv2(rng_seed=seed, show_params=sim_show_params)
     sim.seed = seed
@@ -1684,6 +1692,64 @@ def main(config_dict):
         sim.add_scenario(scenario=set_cell_sleep)
     elif scenario_profile == "no_scenarios":
         pass
+    
+    elif scenario_profile == "exp3_cell_onoff":
+        if not EXP3_AVAILABLE:
+            raise ImportError("EXP3 modules not available. Please ensure exp3_cell_onoff.py and exp3_logger.py are in the project directory.")
+        
+        # EXP3 파라미터 읽기
+        n_cells_to_off = config_dict.get('exp3_n_cells_to_off', 3)
+        learning_rate = config_dict.get('exp3_learning_rate', 0.1)
+        exploration_rate = config_dict.get('exp3_exploration_rate', 0.1)
+        ric_interval = config_dict.get('exp3_ric_interval', 10.0)
+        logger_interval = config_dict.get('exp3_logger_interval', 1.0)
+        
+        # EXP3 RIC 생성
+        exp3_ric = EXP3CellOnOffRIC(
+            sim=sim,
+            interval=ric_interval,
+            n_cells_to_off=n_cells_to_off,
+            learning_rate=learning_rate,
+            exploration_rate=exploration_rate,
+            verbosity=1
+        )
+        # 에너지 모델 연결
+        exp3_ric.set_energy_models(cell_energy_models_dict)
+        
+        # EXP3 Scenario 생성
+        exp3_scenario = EXP3CellOnOffScenario(
+            sim=sim,
+            config_dict=config_dict,
+            interval=base_interval,
+            verbosity=0
+        )
+        
+        # 기존 logger를 EXP3 logger로 교체
+        sim.loggers.clear()  # 기존 logger 제거
+        
+        # EXP3 Logger 생성
+        exp3_logfile_path = data_output_logfile_path.replace('.tsv', '_exp3.tsv')
+        exp3_logger = EXP3Logger(
+            sim=sim,
+            logging_interval=logger_interval,
+            cell_energy_models=cell_energy_models_dict,
+            logfile_path=exp3_logfile_path,
+            ric=exp3_ric
+        )
+        
+        # 컴포넌트 추가
+        sim.add_scenario(exp3_scenario)
+        sim.add_ric(exp3_ric)
+        sim.add_logger(exp3_logger)
+        
+        print(f"EXP3 Cell On/Off scenario activated:", file=stderr)
+        print(f"  - Total cells: {len(sim.cells)}", file=stderr)
+        print(f"  - Cells to turn off: {n_cells_to_off}", file=stderr)
+        print(f"  - Learning rate: {learning_rate}", file=stderr)
+        print(f"  - Exploration rate: {exploration_rate}", file=stderr)
+        print(f"  - RIC interval: {ric_interval}s", file=stderr)
+        print(f"  - Output file: {exp3_logfile_path}", file=stderr)
+    # ===== EXP3 추가 끝 =====
     else:
         raise ValueError("Scenario profile not recognised")
     
