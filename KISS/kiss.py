@@ -1724,11 +1724,8 @@ def main(config_dict):
             verbosity=0
         )
         
-        # 기존 logger를 EXP3 logger로 교체
-        sim.loggers.clear()  # 기존 logger 제거
-        
         # EXP3 Logger 생성
-        exp3_logfile_path = data_output_logfile_path.replace('.tsv', '_exp3.tsv')
+        exp3_logfile_path = data_output_logfile_path + '_exp3.tsv'
         exp3_logger = EXP3Logger(
             sim=sim,
             logging_interval=logger_interval,
