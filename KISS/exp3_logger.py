@@ -58,27 +58,27 @@ class EXP3Logger(Logger):
     def write_header(self):
         """Write TSV file header."""
         headers = [
-            'time',
+            'time_seconds', 
             'n_cells_on',
-            'cells_off',
-            'total_throughput_mbps',
-            'total_power_watts',
-            'efficiency',
+            'cells_off_indices',
+            'total_throughput_Mbps',  
+            'total_power_Watts',
+            'efficiency_Mbps_per_kW',
             'n_ues_attached',
-            'avg_cqi',
-            'avg_sinr_db',
-            'exp3_reward',
+            'avg_cqi', 
+            'avg_sinr_dB',
+            'exp3_reward', 
             'exp3_arm_idx',
-            'exp3_best_arm'
+            'exp3_best_arm_idx'
         ]
         
         # Add per-cell columns
         n_cells = len(self.sim.cells)
         for i in range(n_cells):
             headers.extend([
-                f'cell_{i}_on',
-                f'cell_{i}_power_watts',
-                f'cell_{i}_throughput_mbps',
+                f'cell_{i}_on_state',
+                f'cell_{i}_power_W',
+                f'cell_{i}_throughput_Mbps',
                 f'cell_{i}_n_ues'
             ])
         
@@ -86,53 +86,76 @@ class EXP3Logger(Logger):
         self.f.flush()
     
     def get_cell_metrics(self, cell_idx):
-        """Get metrics for a specific cell."""
+        """
+        Get metrics for a specific cell.
+        
+        Returns:
+        --------
+        dict with:
+            - on: bool, cell on/off state
+            - power: float, power consumption in Watts
+            - throughput: float, throughput in Mbps
+            - n_ues: int, number of attached UEs
+        """
         cell = self.sim.cells[cell_idx]
         
         # Check if cell is on
         is_on = self.ric.cells_on_state[cell_idx] if self.ric else True
         
-        # Get power consumption
+        # Get power consumption in Watts
         power_watts = 0.0
         if is_on and self.cell_energy_models:
             energy_model = self.cell_energy_models.get(cell_idx)
             if energy_model:
                 power_watts = energy_model.get_cell_power_watts(self.sim.env.now)
         
-        # Get throughput
-        throughput = 0.0
+        # Get throughput in Mbps
+        throughput_mbps = 0.0
         if is_on:
-            tp = cell.get_average_throughput()
-            if tp is not None and tp > 0:
-                throughput = tp
+            throughput = cell.get_average_throughput()
+            if throughput is not None and throughput > 0:
+                throughput_mbps = throughput  # Already in Mbps
         
         # Count attached UEs
-        n_ues = cell.get_nattached() if is_on else 0
+        n_ues = len([ue for ue in self.sim.UEs if ue.serving_cell == cell])
         
         return {
             'on': int(is_on),
             'power': power_watts,
-            'throughput': throughput,
+            'throughput': throughput_mbps, 
             'n_ues': n_ues
         }
     
     def get_network_metrics(self):
-        """Calculate network-wide metrics."""
-        total_throughput = 0.0
-        total_power = 0.0
+        """
+        Calculate network-wide metrics with proper units.
+        
+        Returns:
+        --------
+        dict with:
+            - total_throughput: float, total throughput in Mbps
+            - total_power: float, total power in Watts
+            - efficiency: float, efficiency in Mbps/kW
+            - n_ues_attached: int, total attached UEs
+            - avg_cqi: float, average CQI (no unit)
+            - avg_sinr: float, average SINR in dB
+        """
+        total_throughput_mbps = 0.0
+        total_power_watts = 0.0
         total_ues = 0
         total_cqi = 0.0
-        total_sinr = 0.0
+        total_sinr_db = 0.0
         cqi_count = 0
+        sinr_count = 0
         
         for cell_idx, cell in enumerate(self.sim.cells):
             metrics = self.get_cell_metrics(cell_idx)
-            total_throughput += metrics['throughput']
-            total_power += metrics['power']
+            total_throughput_mbps += metrics['throughput']
+            total_power_watts += metrics['power']
             total_ues += metrics['n_ues']
             
-            # Get CQI values
-            if self.ric.cells_on_state[cell_idx]:
+            # Get CQI values (no unit - it's an index)
+            if self.ric and self.ric.cells_on_state[cell_idx]:
                 for ue_idx in cell.reports.get('cqi', {}):
                     cqi_report = cell.reports['cqi'].get(ue_idx)
                     if cqi_report and len(cqi_report) > 1:
@@ -141,29 +164,33 @@ class EXP3Logger(Logger):
                             total_cqi += cqi_val
                             cqi_count += 1
                 
-                # Get SINR if using extended UE class
+                # Get SINR in dB
                 for ue in self.sim.UEs:
                     if hasattr(ue, 'get_sinr_from_cell') and ue.serving_cell == cell:
                         sinr = ue.get_sinr_from_cell(cell)
                         if sinr is not None:
+                            # Convert to dB if not already
                             if isinstance(sinr, np.ndarray):
-                                sinr_val = np.mean(sinr)
+                                sinr_val = 10 * np.log10(np.mean(sinr))
                             else:
-                                sinr_val = sinr
-                            if not np.isnan(sinr_val):
-                                total_sinr += sinr_val
+                                sinr_val = 10 * np.log10(sinr) if sinr > 0 else -np.inf
+                            if not np.isnan(sinr_val) and not np.isinf(sinr_val):
+                                total_sinr_db += sinr_val
+                                sinr_count += 1
         
         avg_cqi = total_cqi / cqi_count if cqi_count > 0 else 0
-        avg_sinr = total_sinr / total_ues if total_ues > 0 else 0
-        efficiency = (total_throughput / (total_power / 1000)) if total_power > 0 else 0
+        avg_sinr_db = total_sinr_db / sinr_count if sinr_count > 0 else 0
+        
+        # Efficiency in Mbps per kW
+        efficiency_mbps_per_kw = (total_throughput_mbps / (total_power_watts / 1000)) if total_power_watts > 0 else 0
         
         return {
-            'total_throughput': total_throughput,
-            'total_power': total_power,
-            'efficiency': efficiency,
+            'total_throughput': total_throughput_mbps,
+            'total_power': total_power_watts,
+            'efficiency': efficiency_mbps_per_kw,
             'n_ues_attached': total_ues,
             'avg_cqi': avg_cqi,
-            'avg_sinr': avg_sinr
+            'avg_sinr': avg_sinr_db
         }
     
     def loop(self):
